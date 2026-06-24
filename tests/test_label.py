@@ -80,12 +80,12 @@ class TestGFA(unittest.TestCase):
         self.assertEqual(recuperada.tobytes(), img.tobytes())
 
 
-def _etiqueta_sintetica(sku: str, com_qr: bool = True) -> EtiquetaZPL:
+def _etiqueta_sintetica(sku: str, com_qr: bool = True, seller_sku: str = "") -> EtiquetaZPL:
     folha = Image.new("1", (816, 1218), 1)
     md: dict = {"imagem_folha": folha, "grf_indice": 1}
     if com_qr:
         md["sticker"] = StickerInfo(sku=sku, qr_left=180, qr_top=24, qr_width=172, qr_height=172)
-    return EtiquetaZPL(sku=sku, zpl_raw="", indice=1, metadados=md)
+    return EtiquetaZPL(sku=sku, zpl_raw="", indice=1, seller_sku=seller_sku, metadados=md)
 
 
 class TestGerarZpl(unittest.TestCase):
@@ -112,6 +112,17 @@ class TestGerarZpl(unittest.TestCase):
         et = _etiqueta_sintetica("A")
         img = R.preview_etiqueta(et, self.model)
         self.assertEqual(img.size, (self.model.largura_dots, self.model.altura_dots))
+
+    def test_seller_sku_do_catalogo_vira_texto_nativo(self):
+        # Folha sintetica e toda branca -> o crop do bitmap nao tem tinta. Com o
+        # Seller SKU do catalogo, o renderer desenha texto nativo -> ha tinta.
+        item = R._item_etiqueta(_etiqueta_sintetica("123", seller_sku="ABC-XYZ-9"))
+        self.assertEqual(item.seller_sku, "ABC-XYZ-9")  # texto propagado ao renderer
+        com = R.preview_etiqueta(_etiqueta_sintetica("123", seller_sku="ABC-XYZ-9"), self.model)
+        sem = R.preview_etiqueta(_etiqueta_sintetica("123"), self.model)
+        # 0 = preto. Mais pixels pretos com o texto nativo desenhado.
+        tinta = lambda im: sum(im.convert("L").histogram()[:128])
+        self.assertGreater(tinta(com), tinta(sem))
 
 
 class TestQrNitido(unittest.TestCase):

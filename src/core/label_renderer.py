@@ -68,11 +68,13 @@ _FONT_CACHE: dict[tuple[int, bool], ImageFont.ImageFont] = {}
 @dataclass
 class _Item:
     """Conteudo de UMA etiqueta a compor: QR + Seller SKU e descricao (bitmaps)
-    + SKU Shopee (texto, do QR)."""
+    + SKU Shopee (texto, do QR). ``seller_sku`` e o texto do catalogo manual
+    (quando mapeado) -> renderizado nativo e nitido em vez do recorte do bitmap."""
     qr: Image.Image
     seller_img: Image.Image | None
     descricao: Image.Image | None
     sku: str
+    seller_sku: str = ""
 
 
 def _fonte(size: int, bold: bool = False) -> ImageFont.ImageFont:
@@ -180,8 +182,8 @@ def _qr_nitido(data: str, lado_dots: int) -> Image.Image | None:
 
 def _colocar_etiqueta(canvas: Image.Image, x0: int, item: _Item, model: LabelModel) -> None:
     """Compoe UMA etiqueta sobre o canvas: QR a esquerda; a direita (de cima
-    para baixo) Seller SKU (bitmap) + SKU Shopee (texto nativo) + descricao
-    (bitmap)."""
+    para baixo) Seller SKU (texto nativo do catalogo, ou bitmap se nao mapeado)
+    + SKU Shopee (texto nativo) + descricao (bitmap)."""
     altura = model.altura_dots
     topo = model.dots(model.margem_topo_mm)
 
@@ -207,10 +209,15 @@ def _colocar_etiqueta(canvas: Image.Image, x0: int, item: _Item, model: LabelMod
         return
 
     y = box_y
-    # Seller SKU (bitmap, em destaque) — sempre presente; aparece sempre.
-    if item.seller_img is not None:
+    # Seller SKU (codigo de coleta mais importante), em destaque.
+    # Preferencia: texto do catalogo manual -> fonte nativa, nitido e preenchendo
+    # a caixa. Fallback: recorte do bitmap (texto ~6px da folha, so legivel ampliado).
+    if item.seller_sku.strip() or item.seller_img is not None:
         h_seller = round(box_h * FRAC_SELLER)
-        img = _resize_bitmap(item.seller_img, box_w, h_seller)
+        if item.seller_sku.strip():
+            img = _render_texto(item.seller_sku, box_w, h_seller, bold=True)
+        else:
+            img = _resize_bitmap(item.seller_img, box_w, h_seller)
         if img is not None:
             canvas.paste(img, (box_x, y))
         y += h_seller + GAP_LINHA
@@ -297,6 +304,7 @@ def _item_etiqueta(etiqueta) -> _Item | None:
         seller_img=grf_decoder.crop_seller_sku(folha, st),
         descricao=grf_decoder.crop_descricao(folha, st),
         sku=(getattr(etiqueta, "sku", "") or ""),
+        seller_sku=(getattr(etiqueta, "seller_sku", "") or ""),
     )
 
 
