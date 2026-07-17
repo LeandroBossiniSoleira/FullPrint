@@ -31,9 +31,8 @@ log = get_logger("label_renderer")
 # ISO/IEC 18004 -> leitura confiavel mesmo em etiqueta pequena (50x25mm).
 QR_BORDER_MODULOS = 4
 
-# Espacamentos internos da etiqueta (dots). Pequenos e fixos: o que importa
-# para o alinhamento na bobina sao as margens/vaos do modelo (configuraveis).
-PAD = 4
+# Espacamentos internos da etiqueta (dots). A zona segura da borda vem do
+# modelo (``pad_interno_mm``, configuravel); os demais sao pequenos e fixos.
 GAP_QR_TEXTO = 8
 GAP_LINHA = 2  # espaco vertical entre as linhas de texto
 
@@ -186,56 +185,74 @@ def _colocar_etiqueta(canvas: Image.Image, x0: int, item: _Item, model: LabelMod
     + SKU Shopee (texto nativo) + descricao (bitmap)."""
     altura = model.altura_dots
     topo = model.dots(model.margem_topo_mm)
+    pad = model.dots(model.pad_interno_mm)
 
     # --- QR (esquerda, centralizado verticalmente) ---
-    qr_dots = min(model.dots(model.qr_mm), altura - topo - 2 * PAD)
+    qr_dots = min(model.dots(model.qr_mm), altura - topo - 2 * pad)
     # Preferencia: regenerar o QR do dado decodificado (modulos em dots inteiros
     # -> nitido). Fallback: recorte do bitmap original reescalado (NEAREST).
     qr = _qr_nitido(item.sku, qr_dots)
     if qr is None:
         qr = item.qr.convert("L").resize((qr_dots, qr_dots), Image.NEAREST).convert("1")
     qr_w, qr_h = qr.size
-    # Centraliza o QR (que pode ser <= qr_dots) na area reservada.
-    qr_x = x0 + PAD + max(0, (qr_dots - qr_w) // 2)
+    qr_x = x0 + pad
     qr_y = topo + max(0, (altura - topo - qr_h) // 2)
     canvas.paste(qr, (qr_x, qr_y))
 
     # --- Coluna de conteudo a direita do QR ---
-    box_x = x0 + PAD + qr_dots + GAP_QR_TEXTO
-    box_w = model.largura_dots - PAD - qr_dots - GAP_QR_TEXTO - PAD
-    box_y = topo + PAD
-    box_h = altura - topo - 2 * PAD
+    # Comeca apos o QR REAL (nao a area reservada ``qr_mm``): o QR regenerado
+    # arredonda para modulos inteiros e costuma ficar MENOR que a reserva
+    # (ex.: 145 de 168 dots) — a folga vira largura util de texto (~3mm).
+    box_x = x0 + pad + qr_w + GAP_QR_TEXTO
+    box_w = model.largura_dots - pad - qr_w - GAP_QR_TEXTO - pad
+    box_y = topo + pad
+    box_h = altura - topo - 2 * pad
     if box_w <= 0 or box_h <= 0:
         return
 
-    y = box_y
+    # Renderiza os blocos primeiro (as faixas FRAC_* dao o teto de altura de
+    # cada um); a posicao vertical e resolvida depois, distribuindo a folga.
+    blocos: list[Image.Image] = []
     # Seller SKU (codigo de coleta mais importante), em destaque.
     # Preferencia: texto do catalogo manual -> fonte nativa, nitido e preenchendo
     # a caixa. Fallback: recorte do bitmap (texto ~6px da folha, so legivel ampliado).
-    if item.seller_sku.strip() or item.seller_img is not None:
-        h_seller = round(box_h * FRAC_SELLER)
-        if item.seller_sku.strip():
-            img = _render_texto(item.seller_sku, box_w, h_seller, bold=True)
-        else:
-            img = _resize_bitmap(item.seller_img, box_w, h_seller)
+    if item.seller_sku.strip():
+        img = _render_texto(item.seller_sku, box_w, round(box_h * FRAC_SELLER), bold=True)
         if img is not None:
-            canvas.paste(img, (box_x, y))
-        y += h_seller + GAP_LINHA
+            blocos.append(img)
+    elif item.seller_img is not None:
+        img = _resize_bitmap(item.seller_img, box_w, round(box_h * FRAC_SELLER))
+        if img is not None:
+            blocos.append(img)
 
     # SKU Shopee (texto nativo, nitido).
     if item.sku.strip():
-        h_sku = round(box_h * FRAC_SKU)
-        img = _render_texto(f"SKU {item.sku}", box_w, h_sku, bold=False)
+        img = _render_texto(f"SKU {item.sku}", box_w, round(box_h * FRAC_SKU), bold=False)
         if img is not None:
-            canvas.paste(img, (box_x, y))
-        y += h_sku + GAP_LINHA
+            blocos.append(img)
 
-    # Descricao (bitmap) ocupa todo o espaco vertical restante.
-    desc_h = box_y + box_h - y
+    # Descricao (bitmap) pode usar todo o espaco vertical que sobrou.
+    desc_h = box_h - sum(b.height for b in blocos) - len(blocos) * GAP_LINHA
     if item.descricao is not None and desc_h > 4:
         desc = _resize_bitmap(item.descricao, box_w, desc_h)
         if desc is not None:
-            canvas.paste(desc, (box_x, y))
+            blocos.append(desc)
+    if not blocos:
+        return
+
+    # Distribui a folga vertical igualmente ENTRE os blocos (space-between).
+    # Os recortes de bitmap sao limitados pela LARGURA (ficam bem mais baixos
+    # que a faixa reservada); empilha-los no topo deixava um vazio torto
+    # embaixo. Espalhar preenche a etiqueta e mantem a ordem de leitura.
+    sobra = box_h - sum(b.height for b in blocos)
+    if len(blocos) == 1:
+        canvas.paste(blocos[0], (box_x, box_y + max(0, sobra // 2)))
+        return
+    vao = max(GAP_LINHA, sobra / (len(blocos) - 1))
+    y = float(box_y)
+    for b in blocos:
+        canvas.paste(b, (box_x, round(y)))
+        y += b.height + vao
 
 
 def compor_etiqueta(item: _Item, model: LabelModel) -> Image.Image:
@@ -269,23 +286,40 @@ def imagem_para_gfa(img: Image.Image) -> str:
 
 
 def gerar_zpl(linhas: list[Image.Image], model: LabelModel, lote_id: str = "LOTE") -> str:
-    """Monta o ZPL final: 1 bloco ^XA por linha da bobina."""
-    largura = model.linha_largura_dots
-    altura = model.altura_dots
+    """Monta o ZPL final: 1 bloco ^XA por imagem.
+
+    ``^PW``/``^LL`` saem do tamanho REAL de cada imagem (nao de constantes do
+    modelo), para servir tanto a uma linha cheia da bobina quanto a uma unica
+    etiqueta (preview/interpretacao). Para linhas cheias o tamanho coincide com
+    ``linha_largura_dots`` x ``altura_dots`` — comportamento inalterado."""
     blocos: list[str] = []
     for img in linhas:
+        bw = img.convert("1")
         blocos.append(
             "^XA\n"
             "^CI28\n"
             "^LH0,0\n"
-            f"^PW{largura}\n"
-            f"^LL{altura}\n"
-            f"^FO0,0{imagem_para_gfa(img)}^FS\n"
+            f"^PW{bw.width}\n"
+            f"^LL{bw.height}\n"
+            f"^FO0,0{imagem_para_gfa(bw)}^FS\n"
             "^PQ1,0,0,N\n"
             "^XZ"
         )
-    log.info("Lote %s composto: %d linhas (%dx%d dots cada)", lote_id, len(linhas), largura, altura)
+    log.info("Lote %s composto: %d blocos", lote_id, len(linhas))
     return "\n".join(blocos)
+
+
+def gerar_zpl_preview_etiqueta(etiqueta, model: LabelModel) -> str | None:
+    """ZPL composto de UMA etiqueta — o MESMO conteudo do preview e da impressao.
+
+    Serve para interpretar via Node (botao "Interpretar ZPL") conferindo o que
+    sera de fato impresso, em vez do ``zpl_raw`` bruto (a folha 10x15 inteira da
+    Shopee, que renderizada na etiqueta pequena sairia cortada/duplicada).
+    Retorna None se a etiqueta nao tem sticker (sem QR para compor)."""
+    item = _item_etiqueta(etiqueta)
+    if item is None:
+        return None
+    return gerar_zpl([compor_etiqueta(item, model)], model)
 
 
 def _item_etiqueta(etiqueta) -> _Item | None:

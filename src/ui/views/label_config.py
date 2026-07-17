@@ -29,6 +29,7 @@ CAMPOS_COMPOSTO = [
     ("Vao entre colunas (mm)", "gap_colunas_mm", float),
     ("Vao entre linhas (mm)", "gap_linhas_mm", float),
     ("Tamanho do QR (mm)", "qr_mm", float),
+    ("Zona segura da borda (mm)", "pad_interno_mm", float),
     ("DPI da impressora", "dpi", int),
 ]
 
