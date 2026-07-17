@@ -15,6 +15,14 @@ qrcode>=7.4
 #   Linux:   apt install libzbar0
 #   Windows: o pyzbar ja inclui libzbar.dll empacotada.
 #
+# OCR OPCIONAL do Seller SKU (src/core/ocr_seller.py): pre-preenche o catalogo
+# como SUGESTAO para confirmacao em lote (nunca vai direto p/ impressao). Requer
+# tambem o binario `tesseract` no sistema. Sem ele, o recurso fica desabilitado
+# (o instalador NAO precisa empacotar o Tesseract -- mantem-se enxuto).
+#   Linux:   apt install tesseract-ocr
+#   Windows: instalar o Tesseract e garantir no PATH (so quem for usar o OCR).
+pytesseract>=0.3.10
+#
 # Interpretacao de ZPL -> imagem (src/core/zpl_renderer.py): nao usa pacote
 # Python -- chama o renderer Node via subprocess. Requer Node.js v18+ instalado
 # e `cd renderer && npm install` (pacote zpl-renderer-js). Veja o README.
