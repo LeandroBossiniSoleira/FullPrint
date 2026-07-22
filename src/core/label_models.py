@@ -46,8 +46,15 @@ class LabelModel:
     margem_topo_mm: float = 0.0     # deslocamento do conteudo dentro da etiqueta
     gap_colunas_mm: float = 3.0     # vao (die-cut) entre colunas
     gap_linhas_mm: float = 3.0      # vao entre linhas (informativo; impressora avanca)
-    # Layout do conteudo dentro de cada etiqueta.
-    qr_mm: float = 21.0             # tamanho do QR no destino
+    # Layout do conteudo dentro de cada etiqueta. ``qr_mm`` e area MAXIMA: o QR
+    # regenerado arredonda p/ modulos inteiros e o texto ganha a folga. 18mm da
+    # modulo de 0,5mm nos SKUs reais (v2, 33 modulos) — escaneavel — e libera
+    # ~4mm de largura para o texto em relacao aos 21mm anteriores.
+    qr_mm: float = 18.0
+    # Zona segura: conteudo fica a esta distancia da borda do die-cut, p/ nao
+    # perder tinta quando a bobina desliza. 1mm segue o referencial de etiqueta
+    # 50x25 do PCP 2.0 (mesma midia, tarefa "Impressao de OP - Emitir Etiqueta").
+    pad_interno_mm: float = 1.0
 
     # ---- conversoes para dots ------------------------------------------
     def dots(self, mm: float) -> int:
@@ -109,7 +116,8 @@ def _modelos_padrao() -> list[LabelModel]:
             margem_topo_mm=0.0,
             gap_colunas_mm=3.0,
             gap_linhas_mm=3.0,
-            qr_mm=21.0,
+            qr_mm=18.0,
+            pad_interno_mm=1.0,
         ),
     ]
 

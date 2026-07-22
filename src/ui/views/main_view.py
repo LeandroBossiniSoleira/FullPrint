@@ -8,10 +8,10 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import customtkinter as ctk
-from PIL import ImageTk
+from PIL import Image, ImageTk
 
 from ...config.settings import Settings
-from ...core import grf_decoder, label_renderer, zpl_renderer
+from ...core import grf_decoder, label_renderer, ocr_seller, zpl_renderer
 from ...core.agrupador import EtiquetaAgrupador
 from ...core.label_models import MODO_PASS_THROUGH, LabelModelStore
 from ...core.parser import ShopeeZPLParser
@@ -20,6 +20,7 @@ from ...services.printer import ZebraPrinterService
 from ...services.spooler_worker import PrintJob, PrintQueueManager
 from ...utils.logger import get_logger
 from .label_config import LabelConfigDialog
+from .ocr_batch_dialog import OcrBatchDialog
 
 log = get_logger("ui.main")
 
@@ -121,6 +122,16 @@ class MainView(ctk.CTkFrame):
         ctk.CTkLabel(
             cabecalho_preview, text="Preview", font=ctk.CTkFont(weight="bold")
         ).grid(row=0, column=0, sticky="w")
+        # Pre-preenche o Seller SKU via OCR (sugestao) para confirmacao em lote.
+        # So aparece habilitado se o Tesseract estiver disponivel e houver lote.
+        self.btn_ocr = ctk.CTkButton(
+            cabecalho_preview,
+            text="Seller SKU via OCR...",
+            width=170,
+            command=self._on_prefill_ocr,
+            state="disabled",
+        )
+        self.btn_ocr.grid(row=0, column=1, sticky="e", padx=(0, 8))
         self.toggle_modo = ctk.CTkSegmentedButton(
             cabecalho_preview,
             values=["Por SKU", "Individual"],
@@ -128,7 +139,7 @@ class MainView(ctk.CTkFrame):
             width=240,
         )
         self.toggle_modo.set("Por SKU")
-        self.toggle_modo.grid(row=0, column=1, sticky="e")
+        self.toggle_modo.grid(row=0, column=2, sticky="e")
 
         self._build_preview_tree(preview)
         self._build_painel_imagem(preview)
@@ -327,6 +338,9 @@ class MainView(ctk.CTkFrame):
         self.btn_processar.configure(state=estado_processar)
         self.btn_anexar.configure(state=estado_anexar)
         self.btn_imprimir.configure(state=estado_imprimir)
+        # OCR so com lote processado, fora de processamento e com Tesseract.
+        ocr_ok = (not busy) and bool(self._etiquetas_atuais) and ocr_seller.is_available()
+        self.btn_ocr.configure(state="normal" if ocr_ok else "disabled")
 
     # ------------------------------------------------------------------- acoes
     def _on_trocar_modo(self, valor: str) -> None:
@@ -352,6 +366,7 @@ class MainView(ctk.CTkFrame):
         self._iid_etiqueta = {}
         self._et_selecionada = None
         self.btn_interpretar.configure(state="disabled")
+        self.btn_ocr.configure(state="disabled")
         self.tree.delete(*self.tree.get_children())
         self._mostrar_imagem(None, "Selecione uma linha para ver o sticker.")
         self.lbl_arquivo.configure(text=str(self._arquivo_atual))
@@ -414,6 +429,9 @@ class MainView(ctk.CTkFrame):
             resumo = f"{len(grupos)} SKUs  |  {blocos} etiquetas  |  Arquivo: {nome}"
         self.lbl_resumo.configure(text=resumo)
         self.btn_imprimir.configure(state="normal")
+        # Habilita o pre-preenchimento via OCR se houver Tesseract disponivel.
+        if ocr_seller.is_available():
+            self.btn_ocr.configure(state="normal")
         self.log_status(
             "ok",
             f"Processado: {len(grupos)} SKUs / {blocos} etiquetas / {stickers} stickers.",
@@ -495,6 +513,59 @@ class MainView(ctk.CTkFrame):
         self.log_status(
             "ok",
             f"Seller SKU '{novo}' salvo para {sku_numerico} (catalogo: {self.catalog.total()} mapeamentos).",
+        )
+
+    def _on_prefill_ocr(self) -> None:
+        """Abre o dialogo de pre-preenchimento do Seller SKU via OCR (em lote).
+
+        O OCR e so sugestao (fonte ~6px da Shopee erra); o usuario confere e
+        corrige antes de salvar. A impressao usa so o texto confirmado.
+        """
+        if self._busy or not self._etiquetas_atuais:
+            return
+        if not ocr_seller.is_available():
+            messagebox.showwarning(
+                "OCR indisponivel",
+                ocr_seller.unavailable_reason() or "OCR indisponivel.",
+            )
+            return
+        # 1a etiqueta (com sticker) de cada SKU -> recorte do Seller SKU.
+        itens: list[tuple[str, Image.Image, str]] = []
+        vistos: set[str] = set()
+        for et in self._etiquetas_atuais:
+            st = et.metadados.get("sticker")
+            folha = et.metadados.get("imagem_folha")
+            if st is None or folha is None or et.sku in vistos:
+                continue
+            vistos.add(et.sku)
+            crop = grf_decoder.crop_seller_sku(folha, st)
+            itens.append((et.sku, crop, self.catalog.get(et.sku) or ""))
+        if not itens:
+            messagebox.showinfo(
+                "Nada a mapear", "Nenhum sticker com QR para pre-preencher."
+            )
+            return
+        OcrBatchDialog(
+            self,
+            itens=itens,
+            ocr_func=ocr_seller.ocr_seller,
+            on_save=self._on_ocr_confirmado,
+        )
+
+    def _on_ocr_confirmado(self, confirmados: dict[str, str]) -> None:
+        """Persiste os Seller SKUs confirmados no lote e atualiza preview."""
+        for sku, seller in confirmados.items():
+            self.catalog.set(sku, seller)
+        # Reflete nas EtiquetaZPL em memoria pra o preview/impressao usarem agora.
+        for et in self._etiquetas_atuais:
+            valor = self.catalog.get(et.sku)
+            if valor:
+                et.seller_sku = valor
+        self._renderizar_preview()
+        self.log_status(
+            "ok",
+            f"OCR: {len(confirmados)} Seller SKUs confirmados "
+            f"(catalogo: {self.catalog.total()} mapeamentos).",
         )
 
     def _impressora_valida(self) -> str | None:
@@ -598,13 +669,28 @@ class MainView(ctk.CTkFrame):
         self._mostrar_imagem(img, legenda)
 
     def _on_interpretar_zpl(self) -> None:
-        """Renderiza o ZPL bruto da etiqueta selecionada interpretando-o de
-        verdade (Node/zpl-renderer-js) — util para conferir texto/barcodes e o
-        que o app gera, sem depender do bitmap GRF embutido."""
+        """Interpreta o ZPL via Node (zpl-renderer-js) para conferir o resultado.
+
+        - Modo COMPOSTO: interpreta o ZPL que o app GERA para esta etiqueta (=
+          o que sera impresso, igual ao preview). O ``zpl_raw`` bruto e a folha
+          10x15 inteira e, renderizado na etiqueta pequena, sairia cortado e com
+          QRs duplicados.
+        - Modo PASS-THROUGH: interpreta o ``zpl_raw`` original (folha 10x15 fiel).
+        """
         et = self._et_selecionada
-        if et is None or not getattr(et, "zpl_raw", "").strip():
+        if et is None:
             return
-        self._render_zpl_async(et.zpl_raw, f"ZPL interpretado  -  SKU {et.sku}", self.label_store.ativo())
+        modelo = self.label_store.ativo()
+        if modelo.modo != MODO_PASS_THROUGH and et.metadados.get("sticker") is not None:
+            zpl = label_renderer.gerar_zpl_preview_etiqueta(et, modelo)
+            if zpl is None:
+                self._mostrar_imagem(None, "Etiqueta sem QR para compor.")
+                return
+            self._render_zpl_async(zpl, f"ZPL composto interpretado  -  SKU {et.sku}", modelo)
+            return
+        if not getattr(et, "zpl_raw", "").strip():
+            return
+        self._render_zpl_async(et.zpl_raw, f"ZPL interpretado  -  SKU {et.sku}", modelo)
 
     def _render_zpl_async(self, zpl: str, legenda: str, modelo) -> None:
         """Interpreta o ``zpl`` fora da UI (subprocess Node leva ~1s) e mostra a
@@ -644,7 +730,8 @@ class MainView(ctk.CTkFrame):
         tamanho = (max(1, int(w * fator)), max(1, int(h * fator)))
         # tk.Label nao reescala sozinho (CTkImage reescalava via size): fazemos o
         # resize no PIL e guardamos o PhotoImage (referencia viva evita GC).
-        img = img.resize(tamanho)
+        # LANCZOS: downscale forte (ate ~7x) sem o borrao do BICUBIC default.
+        img = img.resize(tamanho, Image.LANCZOS)
         self._tk_img_atual = ImageTk.PhotoImage(img)
         self.lbl_imagem.configure(image=self._tk_img_atual, text="")
         self.lbl_imagem_info.configure(text=legenda)
