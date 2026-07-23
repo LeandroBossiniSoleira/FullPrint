@@ -15,7 +15,15 @@
  * IMPORTANTE: a lib trabalha em MILIMETROS e dpmm (dots/mm):
  *   dpmm 8 = 203 dpi, 12 = 300 dpi, 24 = 600 dpi.
  */
-import { ready } from "zpl-renderer-js";
+// zpl-renderer-js e' um pacote dual CJS+ESM. O Node resolve o formato de forma
+// diferente entre versoes (ex.: v20.20 trata como ESM e o import nomeado
+// funciona; v20.18 trata como CommonJS e `import { ready }` quebra com
+// "does not provide an export named 'ready'"). Carregar via createRequire forca
+// sempre o build CJS (`require`) e devolve module.exports com `ready` em
+// qualquer versao do Node. Ver ClickUp 86ajk2mc2 (erro no PC do ARTHUR).
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const { ready } = require("zpl-renderer-js");
 
 const args = process.argv.slice(2);
 const dpmm = parseInt(args[0], 10) || 8; // 8 = 203 dpi (impressora Zebra ZD220)
