@@ -110,7 +110,7 @@ class MainView(ctk.CTkFrame):
         anexo.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=6)
         anexo.grid_columnconfigure(1, weight=1)
 
-        self.btn_anexar = ctk.CTkButton(anexo, text="Anexar arquivo TXT...", command=self._on_anexar, width=200)
+        self.btn_anexar = ctk.CTkButton(anexo, text="Anexar PDF ou TXT...", command=self._on_anexar, width=200)
         self.btn_anexar.grid(row=0, column=0, padx=12, pady=10)
 
         self.lbl_arquivo = ctk.CTkLabel(anexo, text="Nenhum arquivo selecionado.", anchor="w")
@@ -379,12 +379,12 @@ class MainView(ctk.CTkFrame):
             return
         diretorio_inicial = str(self.settings.default_input_dir) if self.settings.default_input_dir.exists() else None
         caminho = filedialog.askopenfilename(
-            title="Selecione o arquivo TXT/ZPL/PDF da Shopee",
+            title="Selecione o PDF (recomendado) ou TXT/ZPL da Shopee",
             initialdir=diretorio_inicial,
             filetypes=[
-                ("Etiquetas Shopee", "*.txt *.zpl *.pdf"),
-                ("PDF", "*.pdf"),
-                ("Arquivos ZPL/TXT", "*.txt *.zpl"),
+                ("Etiquetas Shopee (PDF/TXT/ZPL)", "*.pdf *.txt *.zpl"),
+                ("PDF (recomendado)", "*.pdf"),
+                ("TXT/ZPL", "*.txt *.zpl"),
                 ("Todos", "*.*"),
             ],
         )
