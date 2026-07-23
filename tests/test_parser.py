@@ -165,9 +165,12 @@ class TestCropSticker(unittest.TestCase):
         self.assertLessEqual(crop2.size[1], 100 + grf_decoder.CROP_MARGEM_TOPO)
 
     def test_crop_seller_e_descricao_separam_as_linhas(self):
-        # Geometria calibrada: abaixo do QR vem Seller SKU (~[+7:+13]),
-        # SKU numerico (~[+14:+20]) e descricao (~[+21:+37]). crop_seller_sku
-        # pega so a 1a linha; crop_descricao pula Seller+SKU e pega a descricao.
+        # Geometria calibrada: abaixo do QR vem Seller SKU (~[+6:+11]), SKU
+        # numerico (~[+14:+20]) e descricao (~[+21:+37]). crop_seller_sku pega
+        # a linha inteira (label + valor -- a Shopee centraliza esse texto, um
+        # offset fixo pra pular so o label corta o valor em SKUs mais curtos/
+        # longos, ver ClickUp 86ajk2mc2); crop_descricao pula Seller+SKU e
+        # pega a descricao.
         from PIL import ImageOps
 
         st = StickerInfo(sku="X", qr_left=180, qr_top=24, qr_width=172, qr_height=172)

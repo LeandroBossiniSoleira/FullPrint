@@ -139,17 +139,28 @@ def crop_qr(folha: Image.Image, st: StickerInfo) -> Image.Image:
     )
 
 
-# Faixa do Seller SKU (1a linha do bloco, ~[+7:+13] abaixo do QR). Recortamos do
-# bitmap porque o Seller SKU so existe rasterizado / no catalogo manual; aqui
-# garantimos que ele apareca SEMPRE. Margem folgada cobre variacao de +-2px.
-SELLER_TOPO = 5
+# Faixa do Seller SKU (1a linha do bloco, abaixo do QR). Recortamos do bitmap
+# porque o Seller SKU so existe rasterizado / no catalogo manual; aqui
+# garantimos que ele apareca SEMPRE. Calibrado com dado real (scan pixel a
+# pixel, 2026-07-22, ClickUp 86ajk2mc2): tinta em [+6:+11], proxima linha (SKU
+# numerico) comeca em +14 -> folga de 2px em ambos os lados (era so 1px no
+# topo antes, cortava em stickers com fonte 1-2px mais alta).
+SELLER_TOPO = 4
 SELLER_ALTURA = 9
+
+# ATENCAO: a Shopee CENTRALIZA o texto "Seller SKU:VALOR" nessa linha (nao
+# alinha a esquerda) -- testado com >30 SKUs reais, ClickUp 86ajk2mc2. Por
+# isso NAO da pra usar um offset X fixo pra pular so o label "Seller SKU:" e
+# pegar so o valor: pra textos mais curtos/longos o bloco inteiro desloca
+# (fica mais ou menos centralizado), entao um corte fixo calibrado numa
+# amostra corta o INICIO do valor em muitos outros SKUs. Por isso recortamos a
+# linha INTEIRA (label + valor) sempre -- garante que nunca falta nada, ao
+# custo de exibir o label redundante junto.
 
 
 def crop_seller_sku(folha: Image.Image, st: StickerInfo) -> Image.Image:
-    """Recorta a linha do Seller SKU (1a linha de texto, logo abaixo do QR).
-
-    Mesma largura dos demais recortes; o renderizador apara o branco depois.
+    """Recorta a linha do Seller SKU (1a linha de texto, logo abaixo do QR) —
+    label ("Seller SKU:") + valor juntos, como a Shopee imprime.
     """
     return _crop_clampado(
         folha,
