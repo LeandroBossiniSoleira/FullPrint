@@ -16,7 +16,7 @@ from typing import Callable
 
 from ..utils import zpl_utils
 from ..utils.logger import get_logger
-from . import grf_decoder
+from . import grf_decoder, pdf_reader
 from .sku_catalog import SKUCatalog
 
 log = get_logger("parser")
@@ -35,6 +35,7 @@ class EtiquetaZPL:
     zpl_raw: str
     indice: int = 0                # indice global do sticker
     seller_sku: str = ""           # opcional, vem do cache manual
+    descricao: str = ""            # texto do produto (fonte PDF); vazio = usa bitmap
     metadados: dict = field(default_factory=dict)
 
 
@@ -160,3 +161,51 @@ class ShopeeZPLParser(MarketplaceParser):
             1,
             f"Nao foi possivel decodificar o arquivo ({ultimo_erro})",
         )
+
+
+class ShopeePDFParser(MarketplaceParser):
+    """Le o PDF de etiquetas da Shopee pela CAMADA TEXTUAL (sem OCR).
+
+    Cada pagina do PDF = 1 etiqueta. SKU / Seller SKU / descricao vem como
+    TEXTO real (via ``pdf_reader``) -> render nativo (^A0) nitido, sem os
+    recortes rasterizados do fluxo GRF. Nao ha ``zpl_raw`` (o PDF nao e ZPL):
+    a impressao e SEMPRE composta (nunca pass-through).
+    """
+
+    nome = "Shopee PDF"
+
+    def __init__(self, progress_callback: ProgressCallback | None = None) -> None:
+        self.progress_callback = progress_callback or (lambda _msg: None)
+
+    def parse_file(self, filepath: str | Path) -> list[EtiquetaZPL]:
+        path = Path(filepath)
+        if not path.exists():
+            raise FileNotFoundError(f"Arquivo nao encontrado: {path}")
+        etiquetas = self._converter(pdf_reader.ler_etiquetas(path))
+        log.info("Parse PDF concluido: %s -> %d etiquetas", path.name, len(etiquetas))
+        return etiquetas
+
+    def parse_bytes(self, dados: bytes) -> list[EtiquetaZPL]:
+        return self._converter(pdf_reader.ler_etiquetas_bytes(dados))
+
+    def parse_content(self, conteudo: str) -> list[EtiquetaZPL]:
+        raise NotImplementedError("PDF nao e texto puro; use parse_file/parse_bytes.")
+
+    def _converter(self, paginas: list[pdf_reader.PDFEtiqueta]) -> list[EtiquetaZPL]:
+        etiquetas: list[EtiquetaZPL] = []
+        for i, pe in enumerate(paginas, start=1):
+            etiquetas.append(
+                EtiquetaZPL(
+                    sku=pe.sku or f"SEM-SKU-{i:04d}",
+                    zpl_raw="",  # sem ZPL bruto -> forca modo composto na UI
+                    indice=i,
+                    seller_sku=pe.seller_sku,
+                    descricao=pe.descricao,
+                    metadados={
+                        "fonte": "pdf",
+                        "pagina": pe.pagina,
+                        "problemas": pe.validar(),
+                    },
+                )
+            )
+        return etiquetas

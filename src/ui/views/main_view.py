@@ -14,7 +14,7 @@ from ...config.settings import Settings
 from ...core import grf_decoder, label_renderer, ocr_seller, zpl_renderer
 from ...core.agrupador import EtiquetaAgrupador
 from ...core.label_models import MODO_PASS_THROUGH, LabelModelStore
-from ...core.parser import ShopeeZPLParser
+from ...core.parser import ShopeePDFParser, ShopeeZPLParser
 from ...core.sku_catalog import SKUCatalog
 from ...services.printer import ZebraPrinterService
 from ...services.spooler_worker import PrintJob, PrintQueueManager
@@ -56,12 +56,22 @@ class MainView(ctk.CTkFrame):
             progress_callback=lambda msg: self.after(0, self._progresso_parse, msg),
             catalog=self.catalog,
         )
+        # PDF da Shopee: le a camada textual (SKU/Seller SKU/descricao como texto
+        # real, render nativo nitido, sem OCR). Selecionado por extensao (.pdf).
+        self.pdf_parser = ShopeePDFParser(
+            progress_callback=lambda msg: self.after(0, self._progresso_parse, msg),
+        )
         self.agrupador = EtiquetaAgrupador()
 
         self._arquivo_atual: Path | None = None
         self._lote_bytes: bytes | None = None  # bytes originais p/ pass-through
         self._etiquetas_atuais: list = []
         self._grupos_atuais = None
+        # Tamanho padrao (SKU/Seller SKU) calibrado p/ TODO o lote atual -- garante
+        # que toda etiqueta saia com a mesma "fonte"/escala (nao cada uma otimizada
+        # so pro seu proprio texto). Recalibrado ao processar arquivo, trocar de
+        # modelo ou mapear/confirmar um Seller SKU no catalogo.
+        self._padrao_lote = None
         self._iid_etiqueta: dict[str, object] = {}
         self._tk_img_atual = None   # referencia viva do PhotoImage (evita GC da imagem Tk)
         self._preview_seq = 0       # token anti-corrida do render assincrono de ZPL
@@ -300,11 +310,27 @@ class MainView(ctk.CTkFrame):
             self.label_store.set_ativo(model_id)
             m = self.label_store.ativo()
             self.log_status("info", f"Modelo de etiqueta: {m.nome} ({m.modo}).")
+            # A geometria (box_w/box_h) do padrao depende do modelo -> recalibra.
+            self._recalibrar_padrao_lote()
             # Atualiza o preview da linha selecionada para o novo modelo.
             self._on_selecionar_linha()
 
     def _id_por_nome_modelo(self, nome: str) -> str | None:
         return getattr(self, "_id_modelo_por_nome", {}).get(nome)
+
+    def _recalibrar_padrao_lote(self) -> None:
+        """Recalibra o tamanho padrao (SKU/Seller SKU) pro lote atual -- ver
+        ``label_renderer.calibrar_padrao_lote``. Chamar sempre que o
+        conjunto de etiquetas, o modelo ativo ou o catalogo (Seller SKU
+        mapeado) mudar, senao o preview/impressao usam um padrao desatualizado."""
+        if not self._etiquetas_atuais:
+            self._padrao_lote = None
+            return
+        modelo = self.label_store.ativo()
+        if modelo.modo == MODO_PASS_THROUGH:
+            self._padrao_lote = None
+            return
+        self._padrao_lote = label_renderer.calibrar_padrao_lote(self._etiquetas_atuais, modelo)
 
     def _abrir_config(self) -> None:
         LabelConfigDialog(
@@ -353,9 +379,14 @@ class MainView(ctk.CTkFrame):
             return
         diretorio_inicial = str(self.settings.default_input_dir) if self.settings.default_input_dir.exists() else None
         caminho = filedialog.askopenfilename(
-            title="Selecione o arquivo TXT/ZPL da Shopee",
+            title="Selecione o arquivo TXT/ZPL/PDF da Shopee",
             initialdir=diretorio_inicial,
-            filetypes=[("Arquivos ZPL/TXT", "*.txt *.zpl"), ("Todos", "*.*")],
+            filetypes=[
+                ("Etiquetas Shopee", "*.txt *.zpl *.pdf"),
+                ("PDF", "*.pdf"),
+                ("Arquivos ZPL/TXT", "*.txt *.zpl"),
+                ("Todos", "*.*"),
+            ],
         )
         if not caminho:
             return
@@ -390,7 +421,9 @@ class MainView(ctk.CTkFrame):
                 # Le os bytes UMA vez: o mesmo buffer alimenta o parse (preview)
                 # e a impressao (pass-through fiel, sem decode/re-encode).
                 dados = arquivo.read_bytes()
-                etiquetas = self.parser.parse_bytes(dados)
+                # PDF -> parser da camada textual; TXT/ZPL -> parser ZPL/GRF.
+                parser = self.pdf_parser if arquivo.suffix.lower() == ".pdf" else self.parser
+                etiquetas = parser.parse_bytes(dados)
                 grupos = self.agrupador.agrupar_por_sku(etiquetas) if etiquetas else None
                 self.after(0, self._on_processar_concluido, dados, etiquetas, grupos, None)
             except Exception as exc:  # noqa: BLE001
@@ -415,6 +448,7 @@ class MainView(ctk.CTkFrame):
         self._lote_bytes = dados
         self._etiquetas_atuais = etiquetas
         self._grupos_atuais = grupos
+        self._recalibrar_padrao_lote()
         self._renderizar_preview()
 
         blocos = sum(g.qtd for g in grupos.values())
@@ -508,6 +542,8 @@ class MainView(ctk.CTkFrame):
         for et in self._etiquetas_atuais:
             if et.sku == sku_numerico:
                 et.seller_sku = novo
+        # O padrao do lote depende de quais itens tem Seller SKU mapeado -> recalibra.
+        self._recalibrar_padrao_lote()
         # Re-renderiza preview pra mostrar o novo valor na coluna.
         self._renderizar_preview()
         self.log_status(
@@ -561,6 +597,7 @@ class MainView(ctk.CTkFrame):
             valor = self.catalog.get(et.sku)
             if valor:
                 et.seller_sku = valor
+        self._recalibrar_padrao_lote()
         self._renderizar_preview()
         self.log_status(
             "ok",
@@ -575,6 +612,13 @@ class MainView(ctk.CTkFrame):
             return None
         return impressora
 
+    def _lote_e_pdf(self) -> bool:
+        """True se o lote atual veio de um PDF (camada textual). PDF nao tem
+        pass-through (nao ha ZPL bruto) -> impressao sempre composta."""
+        return bool(self._etiquetas_atuais) and (
+            self._etiquetas_atuais[0].metadados.get("fonte") == "pdf"
+        )
+
     def _on_imprimir(self) -> None:
         if self._busy or not self._lote_bytes:
             return
@@ -583,16 +627,22 @@ class MainView(ctk.CTkFrame):
             return
         lote_id = datetime.now().strftime("%Y%m%d%H%M%S")
         modelo = self.label_store.ativo()
+        lote_pdf = self._lote_e_pdf()
 
-        if modelo.modo == MODO_PASS_THROUGH:
+        if modelo.modo == MODO_PASS_THROUGH and not lote_pdf:
             # Fiel: envia os bytes ORIGINAIS do arquivo (sem re-render/re-encode).
             job = PrintJob(printer_name=impressora, job_name=f"Lote-{lote_id}", zpl_content=self._lote_bytes)
             self.log_status("info", f"Lote {lote_id} (fiel) enviado para fila de impressao.")
         else:
+            if modelo.modo == MODO_PASS_THROUGH and lote_pdf:
+                self.log_status(
+                    "aviso", "PDF nao tem modo fiel; sera composto no layout do modelo ativo."
+                )
             etiquetas = self._etiquetas_atuais
-            sem_qr = sum(1 for et in etiquetas if et.metadados.get("sticker") is None)
-            if sem_qr:
-                self.log_status("aviso", f"{sem_qr} etiqueta(s) sem QR nao serao compostas.")
+            if not lote_pdf:
+                sem_qr = sum(1 for et in etiquetas if et.metadados.get("sticker") is None)
+                if sem_qr:
+                    self.log_status("aviso", f"{sem_qr} etiqueta(s) sem QR nao serao compostas.")
 
             # Compor no worker (off-UI): recorta QRs/textos e monta o ZPL ^GFA.
             def builder() -> str:
@@ -615,7 +665,14 @@ class MainView(ctk.CTkFrame):
                 "Teste", "Modo fiel imprime o arquivo original; nao ha etiqueta de teste.", parent=self
             )
             return
-        amostra = next((et for et in self._etiquetas_atuais if et.metadados.get("sticker") is not None), None)
+        amostra = next(
+            (
+                et
+                for et in self._etiquetas_atuais
+                if et.metadados.get("sticker") is not None or et.metadados.get("fonte") == "pdf"
+            ),
+            None,
+        )
         if amostra is None:
             messagebox.showinfo(
                 "Teste", "Processe um arquivo da Shopee antes de imprimir o teste.", parent=self
@@ -624,8 +681,8 @@ class MainView(ctk.CTkFrame):
 
         def builder() -> str:
             item = label_renderer._item_etiqueta(amostra)
-            img = label_renderer.compor_linha([item], modelo)
-            return label_renderer.gerar_zpl([img], modelo, lote_id="TESTE")
+            linha = label_renderer.compor_linha([item], modelo, padrao=self._padrao_lote)
+            return label_renderer.gerar_zpl([linha], modelo, lote_id="TESTE")
 
         self.worker.submit(PrintJob(printer_name=impressora, job_name="Teste-Etiqueta", builder=builder))
         self.log_status("info", f"Etiqueta de teste enviada ({modelo.nome}).")
@@ -639,27 +696,53 @@ class MainView(ctk.CTkFrame):
         if et is None:
             return
         self._et_selecionada = et
-        # Botao "Interpretar ZPL" disponivel sempre que ha ZPL bruto + Node ok.
+        modelo = self.label_store.ativo()
+        fonte_pdf = et.metadados.get("fonte") == "pdf"
         tem_zpl = bool(getattr(et, "zpl_raw", "").strip())
-        self.btn_interpretar.configure(
-            state="normal" if (tem_zpl and zpl_renderer.is_available()) else "disabled"
+        # Botao "Interpretar ZPL": ha ZPL bruto (TXT/GRF) OU etiqueta composta (PDF).
+        pode_interpretar = zpl_renderer.is_available() and (
+            tem_zpl or (fonte_pdf and modelo.modo != MODO_PASS_THROUGH)
         )
+        self.btn_interpretar.configure(state="normal" if pode_interpretar else "disabled")
+
+        # PDF: sem bitmap GRF nem ZPL bruto, mas compoe via texto + QR regenerado
+        # do sku. Preview = etiqueta composta interpretada via Node (= o que
+        # imprime), igual ao caminho do sticker GRF no modo composto.
+        if fonte_pdf and modelo.modo != MODO_PASS_THROUGH:
+            legenda = f"{modelo.nome}  -  SKU {et.sku}"
+            zpl = label_renderer.gerar_zpl_preview_etiqueta(et, modelo, padrao=self._padrao_lote)
+            if zpl is not None and zpl_renderer.is_available():
+                self._render_zpl_async(zpl, legenda, modelo)
+            else:
+                img = label_renderer.preview_etiqueta(et, modelo)
+                self._mostrar_imagem(img, legenda if img is not None else "Etiqueta sem SKU para compor.")
+            return
+
         folha = et.metadados.get("imagem_folha")
         if folha is None:
             # Sem bitmap GRF (ZPL "texto puro"): antes ficava cego. Agora
             # interpretamos o ZPL de verdade via Node (texto, barcodes, QR...).
             if tem_zpl and zpl_renderer.is_available():
-                self._render_zpl_async(et.zpl_raw, f"ZPL interpretado  -  SKU {et.sku}", self.label_store.ativo())
+                self._render_zpl_async(et.zpl_raw, f"ZPL interpretado  -  SKU {et.sku}", modelo)
             else:
                 motivo = zpl_renderer.unavailable_reason() or "Sem imagem para este formato."
                 self._mostrar_imagem(None, motivo)
             return
         st = et.metadados.get("sticker")
-        modelo = self.label_store.ativo()
         if st is not None and modelo.modo != MODO_PASS_THROUGH:
-            # Preview = etiqueta JA composta no modelo ativo (igual ao que imprime).
-            img = label_renderer.preview_etiqueta(et, modelo)
+            # Preview = etiqueta JA composta no modelo ativo (igual ao que
+            # imprime). SKU/Seller SKU (quando mapeado) saem como campo ZPL
+            # NATIVO (^A0) na impressao -- a aproximacao em PIL (fonte
+            # TrueType, ``preview_etiqueta``) nao bate com a fonte real da
+            # impressora (calibrada bem mais condensada). Por isso interpreta
+            # o ZPL de verdade via Node (mesmo caminho do botao "Interpretar
+            # ZPL"), com fallback pra aproximacao PIL so se o Node faltar.
             legenda = f"{modelo.nome}  -  SKU {et.sku}"
+            zpl = label_renderer.gerar_zpl_preview_etiqueta(et, modelo, padrao=self._padrao_lote)
+            if zpl is not None and zpl_renderer.is_available():
+                self._render_zpl_async(zpl, legenda, modelo)
+                return
+            img = label_renderer.preview_etiqueta(et, modelo)
         elif st is not None:
             img = grf_decoder.crop_sticker(folha, st)
             legenda = f"SKU {et.sku}  -  folha {et.metadados.get('grf_indice', '?')} (fiel 10x15)"
@@ -681,8 +764,9 @@ class MainView(ctk.CTkFrame):
         if et is None:
             return
         modelo = self.label_store.ativo()
-        if modelo.modo != MODO_PASS_THROUGH and et.metadados.get("sticker") is not None:
-            zpl = label_renderer.gerar_zpl_preview_etiqueta(et, modelo)
+        composavel = et.metadados.get("sticker") is not None or et.metadados.get("fonte") == "pdf"
+        if modelo.modo != MODO_PASS_THROUGH and composavel:
+            zpl = label_renderer.gerar_zpl_preview_etiqueta(et, modelo, padrao=self._padrao_lote)
             if zpl is None:
                 self._mostrar_imagem(None, "Etiqueta sem QR para compor.")
                 return
