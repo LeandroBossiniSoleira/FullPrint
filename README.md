@@ -1,40 +1,59 @@
-# Shopee ZPL Spooler
+# FullPrint — Spooler de etiquetas da Shopee Full
 
-Automação de impressão de etiquetas ZPL da Shopee Full em impressoras Zebra (ZD220). Lê o arquivo `.txt` exportado da Shopee e imprime conforme o **modelo de etiqueta** configurado:
+Automação de impressão das etiquetas de produto da **Shopee Full** em impressoras Zebra (ZD220) e afins. Agrupa por SKU, compõe no layout da sua bobina e manda o lote inteiro pra impressora — eliminando o fluxo manual (imprimir SKU por SKU no navegador + ZebraDesigner).
 
-- **Fiel (10x15 Shopee)**: envia o arquivo **byte a byte** para a impressora (pass-through) — sai idêntico ao original. Para quem usa a bobina padrão da Shopee.
-- **Composto (bobina própria)**: re-monta as etiquetas no tamanho/layout da sua bobina (ex.: 50x25mm, 2 colunas). Cada sticker (QR + texto) é recortado do bitmap original (pixels idênticos, **sem OCR**) e reposicionado, com **1 bloco de impressão por linha** — corrige impressão fora do padrão e etiquetas faltando em bobinas menores.
+## Formas de entrada
 
-> **Status**: v0.3.x. Modelos de etiqueta configuráveis pelo usuário; preview mostra a etiqueta exatamente como vai sair.
+O app aceita **dois tipos de arquivo**. A escolha muda diretamente a qualidade da impressão:
+
+### 1. PDF da Shopee — **recomendado** ⭐
+
+Lê a **camada textual** do PDF gerado pela Shopee (SKU, Seller SKU e descrição) e reimprime tudo como **texto ZPL nativo** (`^A0`), nítido, com o **QR regenerado a partir do próprio dado**. Sem OCR, sem IA e **sem rasterizar** — é o caminho de melhor qualidade e o fluxo principal do projeto. Extração determinista via PyMuPDF; detecta PDF sem camada textual.
+
+### 2. TXT / ZPL da Shopee — opção alternativa
+
+O arquivo `.txt`/`.zpl` exportado. Pode ser impresso de dois jeitos, conforme o **modelo de etiqueta**:
+
+- **Fiel (10x15 Shopee)**: envia o arquivo **byte a byte** (pass-through) — sai idêntico ao original. Indicado para quem usa a bobina padrão 10x15 da Shopee.
+- **Composto (bobina própria)**: recorta cada sticker do **bitmap** original (pixels do arquivo, **sem OCR**) e reposiciona na sua bobina (ex.: 50x25mm, 2 colunas). Como parte do conteúdo vem de imagem rasterizada e reescalada, pode sair **distorcido / menos legível** em bobinas menores.
+
+> **Prefira sempre o PDF quando ele estiver disponível.** O TXT/ZPL composto é uma alternativa para os casos em que só há o arquivo `.txt` — e tende a ficar menos legível que o PDF nativo.
+
+> **Status**: v0.5.x. Entrada por **PDF com texto nativo** é o fluxo principal. Modelos de etiqueta configuráveis; o preview mostra a etiqueta como ela vai sair.
 
 ## Funcionalidades
 
 - Interface gráfica em **CustomTkinter** (tema dark).
 - Seleção de impressora (lista as locais do Windows via `win32print`).
-- Anexar arquivo TXT/ZPL via diálogo.
-- **Impressão pass-through**: os bytes originais do arquivo vão direto para a impressora (RAW), sem decode/re-encode — fidelidade garantida por construção.
-- Preview por SKU ou individual: SKU Shopee lido do **QR code** de cada sticker (pyzbar), quantidade por SKU, e **imagem real do sticker** (recortada do bitmap GRF) ao selecionar uma linha.
-- **Interpretação local de ZPL (substituto do Labelary)**: botão "Interpretar ZPL" renderiza o ZPL bruto de qualquer etiqueta em imagem — texto, fontes, barcodes, QR, etc. — usando `zpl-renderer-js` (WASM) via Node, **sem Labelary online nem limite de caracteres**. ZPL "texto puro" (sem bitmap GRF), que antes não tinha preview, agora é renderizado automaticamente.
+- **Anexar PDF (recomendado) ou TXT/ZPL** via diálogo — o parser é escolhido automaticamente pela extensão.
+- **PDF → texto ZPL nativo**: SKU, Seller SKU e descrição saem como texto nítido (`^A0`), com word-wrap na descrição (nunca corta palavra) e QR regenerado do dado. Sem OCR nem rasterização.
+- **Impressão pass-through** (TXT/ZPL, modelo fiel 10x15): os bytes originais vão direto para a impressora (RAW), sem decode/re-encode — fidelidade por construção.
+- **Impressão composta** (TXT/ZPL ou PDF): re-monta as etiquetas no tamanho/layout da sua bobina, com **1 bloco de impressão por linha**.
+- Preview por SKU ou individual, com **imagem real da etiqueta**, e quantidade por SKU (SKU lido do **QR code** de cada sticker via pyzbar no fluxo TXT).
+- **Interpretação local de ZPL (substituto do Labelary)**: botão "Interpretar ZPL" renderiza o ZPL em imagem — texto, fontes, barcodes, QR, etc. — usando `zpl-renderer-js` (WASM) via Node, **sem Labelary online nem limite de caracteres**.
 - **Seller SKU via catálogo manual**: duplo-clique numa linha cadastra o mapeamento SKU Shopee → Seller SKU (persistido em `data/sku_catalog.json`).
+- **OCR opcional em lote** (só quando o Tesseract está instalado): pré-preenche o Seller SKU como **sugestão** num diálogo de confirmação — a impressão usa apenas o texto confirmado. Sem Tesseract, o recurso se desliga sozinho.
 - Impressão em **thread separada** (worker daemon + fila).
-- **Modo DEV** (Linux/macOS, ou win32print indisponível): grava o ZPL em `data/dev_output/` ao invés de mandar para impressora — útil para desenvolvimento.
+- **Modo DEV** (Linux/macOS, ou win32print indisponível): grava o ZPL em `data/dev_output/` ao invés de mandar para impressora.
 - Log de impressão em painel lateral e arquivo rotacionado (`logs/spooler.log`).
 
 ## Estrutura
 
 ```text
-shopee_zpl_spooler/
+fullprint/
 ├── src/
 │   ├── main.py
 │   ├── config/{settings.py, config.yaml}
-│   ├── core/{parser.py, agrupador.py, grf_decoder.py, sku_catalog.py,
-│   │         label_models.py, label_renderer.py, zpl_renderer.py}
+│   ├── core/{parser.py, pdf_reader.py, agrupador.py, grf_decoder.py,
+│   │         sku_catalog.py, ocr_seller.py, label_models.py,
+│   │         label_renderer.py, zpl_renderer.py}
 │   ├── services/{printer.py, spooler_worker.py, updater.py}
 │   ├── database/     # Fase 2
-│   ├── ui/{app.py, views/main_view.py}
+│   ├── ui/{app.py, views/{main_view.py, label_config.py, ocr_batch_dialog.py}}
 │   └── utils/{logger.py, zpl_utils.py, runtime.py}
 ├── renderer/{package.json, render.mjs}   # motor Node (zpl-renderer-js) p/ interpretar ZPL
-├── tests/{test_parser.py, smoke_pipeline.py, smoke_grf.py, render_grf.py}
+├── tests/{test_parser.py, smoke_pdf.py, smoke_pdf_render.py,
+│          smoke_pdf_pipeline.py, smoke_pipeline.py, smoke_grf.py, render_grf.py}
 ├── logs/  data/
 ├── requirements.txt
 └── README.md
@@ -65,7 +84,7 @@ pip install -r requirements.txt
 cd renderer && npm install && cd ..
 ```
 
-`pywin32` instala apenas no Windows (marker em `requirements.txt`). Em outras plataformas, o serviço cai para **modo DEV** automaticamente. No Linux, o pyzbar precisa do `libzbar0` do sistema (`apt install libzbar0`). Rodando do código-fonte o auto-update fica desativado (só age no `.exe` instalado).
+`pywin32` instala apenas no Windows (marker em `requirements.txt`). Em outras plataformas, o serviço cai para **modo DEV** automaticamente. No Linux, o pyzbar precisa do `libzbar0` do sistema (`apt install libzbar0`). O OCR em lote é opcional e exige o Tesseract instalado (`apt install tesseract-ocr` / instalador no Windows). Rodando do código-fonte o auto-update fica desativado (só age no `.exe` instalado).
 
 ### Renderer de ZPL (Node.js)
 
@@ -74,7 +93,9 @@ A interpretação de ZPL → imagem ("Interpretar ZPL") usa o pacote `zpl-render
 - **Node.js v18+** instalado e no `PATH` (ou aponte o binário via variável de ambiente `FULLPRINT_NODE`).
 - `renderer/node_modules` instalado (`cd renderer && npm install`).
 
-Se o Node não estiver disponível, o app continua funcionando normalmente (impressão, preview de bitmap GRF); apenas o botão "Interpretar ZPL" fica desabilitado com uma mensagem explicando o motivo. O `node_modules/` é versionado fora do git e empacotado no build (CI roda `npm ci`).
+> O `render.mjs` carrega o `zpl-renderer-js` via `createRequire` (build CommonJS), o que mantém a interpretação de ZPL funcionando em qualquer versão do Node (v18–v22), sem depender de como cada versão resolve o pacote dual CJS/ESM.
+
+Se o Node não estiver disponível, o app continua funcionando normalmente (impressão e preview); apenas o botão "Interpretar ZPL" fica desabilitado com uma mensagem explicando o motivo. O `node_modules/` é empacotado no build (CI roda `npm ci`).
 
 **Nas máquinas dos operadores (instalador):** o `FullPrintSetup.exe` detecta se o Node já existe e, se não, **pergunta se deseja instalar** — com o aceite, baixa o Node.js portátil oficial (~30 MB) para `{app}\node` (sem admin, sem alterar o PATH). O app procura o Node nessa pasta automaticamente (`node_executable()`). Quem recusar pode usar o app sem a interpretação de ZPL. O `FULLPRINT_NODE` permite apontar um Node específico, se necessário.
 
@@ -90,6 +111,12 @@ python src/main.py
 
 ```bash
 python -m unittest discover tests
+# ou, com pytest:
+pytest -q
+
+# Smoke com um PDF real da Shopee Full (fluxo recomendado):
+python tests/smoke_pdf.py /caminho/etiquetas_shopee.pdf
+python tests/smoke_pdf_render.py /caminho/etiquetas_shopee.pdf
 # Smoke com um TXT real da Shopee Full (valida o pass-through byte a byte):
 python tests/smoke_grf.py /caminho/arquivo_shopee.txt
 # Calibração visual dos crops de sticker (gera PNGs em data/dev_output/):
@@ -104,7 +131,7 @@ Edite `src/config/config.yaml`:
 - `printer.dev_mode: true`: força modo DEV mesmo no Windows (não imprime, grava arquivo).
 - `paths.default_input_dir`: pasta inicial do diálogo de anexar arquivo.
 
-Os **modelos de etiqueta** são gerenciados pela própria interface (botão "Configurar...") e salvos em `data/label_models.json` — dimensões da bobina, colunas, margens e tamanho do QR. Use "Imprimir teste" para calibrar o alinhamento na bobina real.
+Os **modelos de etiqueta** são gerenciados pela própria interface (botão "Configurar...") e salvos em `data/label_models.json` — dimensões da bobina, colunas, margens, zona segura da borda e tamanho do QR. Use "Imprimir teste" para calibrar o alinhamento na bobina real.
 
 ## Como lançar uma nova versão
 
@@ -137,4 +164,4 @@ Peças do pipeline:
 - Persistência em SQLite (lotes + reimpressão).
 - Refatorar parser sob `MarketplaceParser` para suportar Mercado Livre Full.
 - Barra de progresso real no worker.
-- Agrupamento opcional por SKU na impressão (reordenar folhas inteiras + separadora), mantendo os trios ZPL originais intactos.
+- Suporte a PDF com layout variante (hoje o reader assume 1 etiqueta por página).

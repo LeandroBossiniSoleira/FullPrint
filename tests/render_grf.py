@@ -27,43 +27,14 @@ MAX_FOLHAS = 3
 def render(path: Path) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     conteudo = path.read_bytes().decode("utf-8", errors="replace")
-    folhas = grf_decoder.extrair_etiquetas(conteudo)]
+    folhas = grf_decoder.extrair_etiquetas(conteudo)
+    print(f"[scan] {len(folhas)} folhas GRF em {path.name}")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
+    for folha in folhas[:MAX_FOLHAS]:
+        out = OUT_DIR / f"folha_{folha.indice:02d}.png"
+        folha.imagem.save(out)
+        print(f"  folha #{folha.indice}: {folha.largura}x{folha.altura}, "
+              f"{len(folha.stickers)} QRs -> {out}")
         for j, st in enumerate(folha.stickers, start=1):
             crop = grf_decoder.crop_sticker(folha.imagem, st)
             sku_slug = "".join(c if c.isalnum() else "_" for c in st.sku)[:24]
