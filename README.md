@@ -19,7 +19,7 @@ O arquivo `.txt`/`.zpl` exportado. Pode ser impresso de dois jeitos, conforme o 
 
 > **Prefira sempre o PDF quando ele estiver disponível.** O TXT/ZPL composto é uma alternativa para os casos em que só há o arquivo `.txt` — e tende a ficar menos legível que o PDF nativo.
 
-> **Status**: v0.5.x. Entrada por **PDF com texto nativo** é o fluxo principal. Modelos de etiqueta configuráveis; o preview mostra a etiqueta como ela vai sair.
+> **Status**: v0.6.x. Entrada por **PDF com texto nativo** é o fluxo principal. Modelos de etiqueta configuráveis; o preview mostra a etiqueta como ela vai sair. Cada grupo de SKU sai precedido de **etiquetas separadoras**, dispensando a re-triagem do rolo.
 
 ## Funcionalidades
 
@@ -29,7 +29,8 @@ O arquivo `.txt`/`.zpl` exportado. Pode ser impresso de dois jeitos, conforme o 
 - **PDF → texto ZPL nativo**: SKU, Seller SKU e descrição saem como texto nítido (`^A0`), com word-wrap na descrição (nunca corta palavra) e QR regenerado do dado. Sem OCR nem rasterização.
 - **Impressão pass-through** (TXT/ZPL, modelo fiel 10x15): os bytes originais vão direto para a impressora (RAW), sem decode/re-encode — fidelidade por construção.
 - **Impressão composta** (TXT/ZPL ou PDF): re-monta as etiquetas no tamanho/layout da sua bobina, com **1 bloco de impressão por linha**.
-- Preview por SKU ou individual, com **imagem real da etiqueta**, e quantidade por SKU (SKU lido do **QR code** de cada sticker via pyzbar no fluxo TXT).
+- **Etiqueta separadora entre grupos de SKU**: antes das etiquetas de cada SKU sai uma **linha cheia de separadoras** (uma por coluna da bobina) com seta ↑, o Seller SKU, o SKU Shopee e a quantidade do grupo. O grupo passa a começar numa linha nova, então nenhuma linha física mistura dois SKUs — a separação das pilhas sai direto na colagem, sem re-triagem depois da impressão. Liga/desliga por modelo em "Configurar..." (ClickUp 86ajaafu3).
+- Preview por SKU ou individual, com **imagem real da etiqueta**, e quantidade por SKU (SKU lido do **QR code** de cada sticker via pyzbar no fluxo TXT). As separadoras aparecem como linhas próprias na lista e podem ser conferidas no painel de imagem.
 - **Interpretação local de ZPL (substituto do Labelary)**: botão "Interpretar ZPL" renderiza o ZPL em imagem — texto, fontes, barcodes, QR, etc. — usando `zpl-renderer-js` (WASM) via Node, **sem Labelary online nem limite de caracteres**.
 - **Seller SKU via catálogo manual**: duplo-clique numa linha cadastra o mapeamento SKU Shopee → Seller SKU (persistido em `data/sku_catalog.json`).
 - **OCR opcional em lote** (só quando o Tesseract está instalado): pré-preenche o Seller SKU como **sugestão** num diálogo de confirmação — a impressão usa apenas o texto confirmado. Sem Tesseract, o recurso se desliga sozinho.

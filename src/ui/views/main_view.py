@@ -73,6 +73,9 @@ class MainView(ctk.CTkFrame):
         # modelo ou mapear/confirmar um Seller SKU no catalogo.
         self._padrao_lote = None
         self._iid_etiqueta: dict[str, object] = {}
+        # Linhas de separadora no preview (iid -> InfoSeparador). Selecionar
+        # uma delas mostra a separadora que vai sair impressa antes do grupo.
+        self._iid_separador: dict[str, object] = {}
         self._tk_img_atual = None   # referencia viva do PhotoImage (evita GC da imagem Tk)
         self._preview_seq = 0       # token anti-corrida do render assincrono de ZPL
         self._et_selecionada = None  # etiqueta atual (alvo do "Interpretar ZPL")
@@ -312,6 +315,9 @@ class MainView(ctk.CTkFrame):
             self.log_status("info", f"Modelo de etiqueta: {m.nome} ({m.modo}).")
             # A geometria (box_w/box_h) do padrao depende do modelo -> recalibra.
             self._recalibrar_padrao_lote()
+            # As linhas de separadora dependem do modelo -> re-lista.
+            if self._grupos_atuais is not None:
+                self._renderizar_preview()
             # Atualiza o preview da linha selecionada para o novo modelo.
             self._on_selecionar_linha()
 
@@ -475,10 +481,17 @@ class MainView(ctk.CTkFrame):
         """Cache manual (catalogo) ou '?' — sem sugestao de OCR."""
         return self.catalog.get(sku) or "?"
 
+    def _separadora_ativa(self) -> bool:
+        """True se o modelo ativo emite separadora entre grupos de SKU (so no
+        modo composto: o fiel manda os bytes originais direto)."""
+        m = self.label_store.ativo()
+        return m.modo != MODO_PASS_THROUGH and bool(m.separador_por_sku)
+
     def _renderizar_preview(self) -> None:
         # Limpa em bloco — Treeview lida com isso sem o custo dos widgets CTk.
         self.tree.delete(*self.tree.get_children())
         self._iid_etiqueta = {}
+        self._iid_separador = {}
         if self._modo_preview == "Individual":
             itens = self._etiquetas_atuais
             total = len(itens)
@@ -503,7 +516,24 @@ class MainView(ctk.CTkFrame):
             for et in self._etiquetas_atuais:
                 if et.sku not in primeira_por_sku:
                     primeira_por_sku[et.sku] = et
+            modelo = self.label_store.ativo()
+            com_separadora = self._separadora_ativa()
             for i, grupo in enumerate(itens[:exibir], start=1):
+                if com_separadora:
+                    # Espelha a impressao: 1 linha CHEIA de separadoras (uma por
+                    # coluna da bobina) antes das etiquetas do grupo.
+                    iid_sep = f"sep::{grupo.sku}"
+                    self._iid_separador[iid_sep] = label_renderer.InfoSeparador(
+                        sku=grupo.sku,
+                        seller_sku=self.catalog.get(grupo.sku) or grupo.seller_sku,
+                        qtd=grupo.qtd,
+                    )
+                    self.tree.insert(
+                        "",
+                        "end",
+                        iid=iid_sep,
+                        values=("---", "SEPARADORA", f"-> {grupo.sku}", modelo.colunas),
+                    )
                 iid = f"sku::{grupo.sku}"
                 self._iid_etiqueta[iid] = primeira_por_sku.get(grupo.sku)
                 self.tree.insert(
@@ -643,6 +673,27 @@ class MainView(ctk.CTkFrame):
                 sem_qr = sum(1 for et in etiquetas if et.metadados.get("sticker") is None)
                 if sem_qr:
                     self.log_status("aviso", f"{sem_qr} etiqueta(s) sem QR nao serao compostas.")
+            if modelo.separador_por_sku:
+                comporaveis = [
+                    et
+                    for et in etiquetas
+                    if et.metadados.get("sticker") is not None or et.metadados.get("fonte") == "pdf"
+                ]
+                n_grupos = len(label_renderer.grupos_consecutivos(comporaveis))
+                self.log_status(
+                    "info",
+                    f"{n_grupos} grupo(s) de SKU -> {n_grupos * modelo.colunas} etiquetas separadoras.",
+                )
+                # Separadora respeita a ordem do arquivo (nao reordena o lote).
+                # Se o mesmo SKU aparece em blocos alternados, ele ganha varias
+                # separadoras -- sinal de que o proprio arquivo veio fora de ordem.
+                distintos = len({et.sku for et in comporaveis})
+                if n_grupos > distintos:
+                    self.log_status(
+                        "aviso",
+                        f"O arquivo intercala SKUs ({n_grupos} blocos para {distintos} SKUs): "
+                        "cada bloco recebe sua propria separadora.",
+                    )
 
             # Compor no worker (off-UI): recorta QRs/textos e monta o ZPL ^GFA.
             def builder() -> str:
@@ -691,6 +742,10 @@ class MainView(ctk.CTkFrame):
     def _on_selecionar_linha(self, _event=None) -> None:
         sel = self.tree.selection()
         if not sel:
+            return
+        info_sep = self._iid_separador.get(sel[0])
+        if info_sep is not None:
+            self._mostrar_separadora(info_sep)
             return
         et = self._iid_etiqueta.get(sel[0])
         if et is None:
@@ -750,6 +805,18 @@ class MainView(ctk.CTkFrame):
             img = folha  # QR nao detectado: mostra a folha inteira
             legenda = f"{et.sku}  -  folha inteira (QR nao detectado)"
         self._mostrar_imagem(img, legenda)
+
+    def _mostrar_separadora(self, info) -> None:
+        """Preview da etiqueta separadora do grupo (o que sai impresso antes
+        dele). Interpreta o ZPL via Node, com fallback pra aproximacao PIL."""
+        self._et_selecionada = None
+        self.btn_interpretar.configure(state="disabled")
+        modelo = self.label_store.ativo()
+        legenda = f"Separadora  -  {info.seller_sku or info.sku}  ({modelo.colunas}x por grupo)"
+        if zpl_renderer.is_available():
+            self._render_zpl_async(label_renderer.gerar_zpl_separador(info, modelo), legenda, modelo)
+        else:
+            self._mostrar_imagem(label_renderer.compor_separador(info, modelo), legenda)
 
     def _on_interpretar_zpl(self) -> None:
         """Interpreta o ZPL via Node (zpl-renderer-js) para conferir o resultado.

@@ -233,6 +233,9 @@ Aqui estão os detalhes das classes principais a serem pedidas na geração de c
 * **Lógica Interna:** Iterar a lista, usar um `defaultdict(list)` ou estruturar como `{ "SKU1": {"desc": "...", "etiquetas": ["^XA...", "^XA..."], "qtd": 2} }`.
 
 ### `gerador_lote.py` e `separador_zpl.py`
+
+> **Implementado** (ClickUp 86ajaafu3) dentro de `core/label_renderer.py`, não em módulos próprios: a separadora precisa da mesma geometria de bobina (`LabelModel`) e dos mesmos helpers de dimensionamento de texto nativo (`_campo_zpl_nativo`) usados pela etiqueta de produto. Ver `InfoSeparador`, `compor_linha_separadora` e `grupos_consecutivos`. Diferenças em relação ao esboço abaixo: a separadora sai **antes** do grupo (anuncia o SKU seguinte, com seta ↑), é **replicada em todas as colunas** da bobina (uma linha física inteira) e é ligada/desligada por modelo (`LabelModel.separador_por_sku`).
+
 * **Classe:** `GeradorLoteZPL`
 * **Método Principal:** `gerar_zpl_final(grupos: dict) -> str`
 * **Lógica Interna:** Construir a string final. Para cada SKU no dicionário de grupos, gerar a string do ZPL Separador através de uma f-string interpolando os metadados (SKU, Qtd, Desc), anexá-lo à string final e, logo após, anexar o `zpl_raw` de todas as etiquetas daquele SKU.

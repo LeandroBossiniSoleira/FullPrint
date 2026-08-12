@@ -98,6 +98,17 @@ class LabelConfigDialog(ctk.CTkToplevel):
             ent.grid(row=i, column=1, padx=8, pady=6, sticky="ew")
             self._entries[attr] = ent
 
+        # Separadora entre grupos de SKU (ClickUp 86ajaafu3).
+        self.var_separador = ctk.BooleanVar(value=True)
+        self.chk_separador = ctk.CTkCheckBox(
+            self.form,
+            text="Etiqueta separadora antes de cada SKU",
+            variable=self.var_separador,
+        )
+        self.chk_separador.grid(
+            row=len(CAMPOS_COMPOSTO) + 1, column=0, columnspan=2, padx=8, pady=(12, 6), sticky="w"
+        )
+
         # Rodape
         rodape = ctk.CTkFrame(self)
         rodape.grid(row=3, column=0, sticky="ew", padx=12, pady=(6, 12))
@@ -135,6 +146,7 @@ class LabelConfigDialog(ctk.CTkToplevel):
             ent.delete(0, "end")
             valor = getattr(m, attr)
             ent.insert(0, str(int(valor)) if attr in ("colunas", "dpi") else str(valor))
+        self.var_separador.set(bool(m.separador_por_sku))
         modo_label = "Fiel (10x15 Shopee)" if m.modo == MODO_PASS_THROUGH else "Composto (bobina propria)"
         self.seg_modo.set(modo_label)
         self._aplicar_estado_modo(m.modo)
@@ -143,6 +155,9 @@ class LabelConfigDialog(ctk.CTkToplevel):
         estado = "disabled" if modo == MODO_PASS_THROUGH else "normal"
         for ent in self._entries.values():
             ent.configure(state=estado)
+        # No modo fiel os bytes originais vao direto pra impressora: nao ha onde
+        # inserir separadora.
+        self.chk_separador.configure(state=estado)
 
     def _modo_atual(self) -> str:
         return MODO_PASS_THROUGH if self.seg_modo.get().startswith("Fiel") else MODO_COMPOSTO
@@ -188,7 +203,13 @@ class LabelConfigDialog(ctk.CTkToplevel):
         if valores["colunas"] < 1:
             messagebox.showerror("Valor invalido", "Colunas deve ser >= 1.", parent=self)
             return None
-        return LabelModel(id=self._editando, nome=nome, modo=self._modo_atual(), **valores)
+        return LabelModel(
+            id=self._editando,
+            nome=nome,
+            modo=self._modo_atual(),
+            separador_por_sku=bool(self.var_separador.get()),
+            **valores,
+        )
 
     def _on_salvar(self) -> None:
         m = self._coletar()

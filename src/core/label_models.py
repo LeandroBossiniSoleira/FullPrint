@@ -55,6 +55,10 @@ class LabelModel:
     # perder tinta quando a bobina desliza. 1mm segue o referencial de etiqueta
     # 50x25 do PCP 2.0 (mesma midia, tarefa "Impressao de OP - Emitir Etiqueta").
     pad_interno_mm: float = 1.0
+    # Emite uma LINHA de etiquetas separadoras antes de cada grupo de SKU
+    # (ClickUp 86ajaafu3): o operador separa as pilhas direto na saida da
+    # impressora, sem re-triar o rolo depois. Ver ``label_renderer``.
+    separador_por_sku: bool = True
 
     # ---- conversoes para dots ------------------------------------------
     def dots(self, mm: float) -> int:
