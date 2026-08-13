@@ -867,6 +867,169 @@ def compor_linha(
     return canvas, campos
 
 
+# --------------------------------------------------------------- separadora
+# Etiqueta SEPARADORA (ClickUp 86ajaafu3): marca onde comeca cada grupo de SKU
+# no rolo impresso. Sem ela o operador precisa RE-TRIAR o rolo depois da
+# impressao pra achar onde um SKU termina e o proximo comeca -- com ela a
+# separacao das pilhas sai direto na colagem.
+#
+# Regras (do referencial fotografado na tarefa):
+#   - vem ANTES do grupo e anuncia o SKU/quantidade que vem A SEGUIR;
+#   - a seta aponta PRA CIMA = sentido em que as etiquetas seguintes saem
+#     (no rolo, quem foi impresso depois fica acima de quem saiu antes);
+#   - ocupa a LINHA INTEIRA da bobina (replicada em todas as colunas) -> um
+#     grupo nunca divide uma linha fisica com outro SKU. Na bobina de 2
+#     colunas sao 2 separadoras por grupo, como no referencial.
+SEP_TITULO = "PROXIMO SKU"
+SEP_BORDA = 3        # espessura (dots) da moldura que destaca a separadora
+SEP_GAP_SETA = 6     # vao (dots) entre a seta e a coluna de texto
+SEP_FRAC_SETA = 0.20  # fatia da largura util ocupada pela seta
+# Fatia da altura de cada linha de texto. O codigo de coleta (Seller SKU, ou o
+# SKU Shopee quando nao ha mapeamento) leva a maior: e' o que o operador le pra
+# achar a pilha certa.
+SEP_PESO_TITULO = 0.16
+SEP_PESO_CODIGO = 0.44
+SEP_PESO_AUX = 0.20
+
+
+@dataclass
+class InfoSeparador:
+    """O que a separadora anuncia sobre o grupo que vem DEPOIS dela."""
+    sku: str
+    seller_sku: str = ""
+    qtd: int = 0
+
+
+def _seta_para_cima(largura: int, altura: int) -> Image.Image:
+    """Seta cheia apontando pra cima (bitmap 1-bit), desenhada por poligono --
+    nao depende de glifo de fonte da impressora nem de TTF do SO."""
+    w, h = max(3, int(largura)), max(3, int(altura))
+    img = Image.new("1", (w, h), 1)
+    d = ImageDraw.Draw(img)
+    cabeca_h = max(2, round(h * 0.45))
+    haste_w = max(2, round(w * 0.36))
+    d.polygon([(w // 2, 0), (w - 1, cabeca_h), (0, cabeca_h)], fill=0)
+    x0 = (w - haste_w) // 2
+    d.rectangle([x0, cabeca_h, x0 + haste_w - 1, h - 1], fill=0)
+    return img
+
+
+def _blocos_separador(info: InfoSeparador) -> list[tuple[str, float, int]]:
+    """Linhas de texto da separadora: (texto, peso da altura, max_linhas)."""
+    sku = (info.sku or "").strip()
+    codigo = (info.seller_sku or "").strip() or sku or "?"
+    blocos = [(SEP_TITULO, SEP_PESO_TITULO, 1), (codigo, SEP_PESO_CODIGO, 2)]
+    if sku and sku != codigo:
+        blocos.append((f"SKU {sku}", SEP_PESO_AUX, 1))
+    if info.qtd > 0:
+        blocos.append((f"QTD {info.qtd}", SEP_PESO_AUX, 1))
+    return blocos
+
+
+def _colocar_separador(
+    canvas: Image.Image,
+    x0: int,
+    info: InfoSeparador,
+    model: LabelModel,
+    bake_texto_nativo: bool = True,
+) -> list[_CampoNativo]:
+    """Compoe UMA separadora sobre o canvas: moldura + seta a esquerda + bloco
+    de texto a direita. Mesma convencao de ``_colocar_etiqueta`` -- devolve os
+    campos ZPL nativos e ``bake_texto_nativo`` diz se eles TAMBEM sao pintados
+    no bitmap (True pro preview PIL, False pra impressao)."""
+    campos: list[_CampoNativo] = []
+    topo = model.dots(model.margem_topo_mm)
+    pad = model.dots(model.pad_interno_mm)
+    util_x, util_y = x0 + pad, topo + pad
+    util_w = model.largura_dots - 2 * pad
+    util_h = model.altura_dots - topo - 2 * pad
+    if util_w <= 0 or util_h <= 0:
+        return campos
+
+    # Moldura: e' o que faz a separadora salta ao olho folheando o rolo.
+    d = ImageDraw.Draw(canvas)
+    for i in range(min(SEP_BORDA, util_w // 2, util_h // 2)):
+        d.rectangle(
+            [util_x + i, util_y + i, util_x + util_w - 1 - i, util_y + util_h - 1 - i],
+            outline=0,
+        )
+
+    dentro = SEP_BORDA + 2
+    cx, cy = util_x + dentro, util_y + dentro
+    cw, ch = util_w - 2 * dentro, util_h - 2 * dentro
+    if cw <= 0 or ch <= 0:
+        return campos
+
+    seta_w = max(8, round(cw * SEP_FRAC_SETA))
+    seta = _seta_para_cima(seta_w, min(ch, round(seta_w * 1.4)))
+    canvas.paste(seta, (cx, cy + max(0, (ch - seta.height) // 2)))
+
+    box_x = cx + seta_w + SEP_GAP_SETA
+    box_w = cx + cw - box_x
+    if box_w <= 0:
+        return campos
+
+    blocos = _blocos_separador(info)
+    total_peso = sum(p for _, p, _ in blocos)
+    disp_h = max(1, ch - GAP_LINHA_NATIVA * (len(blocos) - 1))
+    montados: list[tuple[list[str], int, int]] = []
+    for texto, peso, max_l in blocos:
+        box_h = max(8, int(disp_h * peso / total_peso))
+        campo = _campo_zpl_nativo(texto, box_w, box_h, max_linhas=max_l)
+        if campo is None:  # caixa apertada: emite no minimo legivel mesmo assim
+            campo = _campo_zpl_nativo_altura_fixa(texto, 8, box_w, max_linhas=max_l)
+        if campo is not None:
+            montados.append(campo)
+    if not montados:
+        return campos
+
+    alturas = [a * len(l) + GAP_LINHA_NATIVA * (len(l) - 1) for l, a, _ in montados]
+    sobra = max(0, ch - sum(alturas) - GAP_LINHA_NATIVA * (len(montados) - 1))
+    vao = GAP_LINHA_NATIVA + (sobra / (len(montados) - 1) if len(montados) > 1 else 0)
+    y = float(cy)
+    for (linhas, alt, larg), altura_bloco in zip(montados, alturas):
+        y_linha = round(y)
+        for texto_l in linhas:
+            campos.append(_CampoNativo(x=box_x, y=y_linha, altura=alt, largura=larg, texto=texto_l))
+            if bake_texto_nativo:
+                aprox = _render_texto(texto_l, box_w, alt)
+                if aprox is not None:
+                    canvas.paste(aprox, (box_x, y_linha))
+            y_linha += alt + GAP_LINHA_NATIVA
+        y += altura_bloco + vao
+    return campos
+
+
+def compor_separador(info: InfoSeparador, model: LabelModel) -> Image.Image:
+    """Imagem de UMA separadora isolada, com o texto ja aproximado em TTF --
+    preview rapido na UI (irmao de ``compor_etiqueta``)."""
+    canvas = Image.new("1", (model.largura_dots, model.altura_dots), 1)
+    _colocar_separador(canvas, 0, info, model, bake_texto_nativo=True)
+    return canvas
+
+
+def compor_linha_separadora(
+    info: InfoSeparador, model: LabelModel
+) -> tuple[Image.Image, list[_CampoNativo]]:
+    """Linha CHEIA de separadoras (a mesma info em todas as colunas da bobina),
+    pronta pra impressao: canvas sem texto pintado + campos ZPL nativos."""
+    canvas = Image.new("1", (model.linha_largura_dots, model.altura_dots), 1)
+    campos: list[_CampoNativo] = []
+    for col in range(max(1, model.colunas)):
+        campos.extend(
+            _colocar_separador(canvas, model.x0_coluna(col), info, model, bake_texto_nativo=False)
+        )
+    return canvas, campos
+
+
+def gerar_zpl_separador(info: InfoSeparador, model: LabelModel) -> str:
+    """ZPL de UMA separadora (1 etiqueta) -- pro preview interpretado via Node
+    mostrar exatamente o que vai sair impresso entre os grupos."""
+    canvas = Image.new("1", (model.largura_dots, model.altura_dots), 1)
+    campos = _colocar_separador(canvas, 0, info, model, bake_texto_nativo=False)
+    return gerar_zpl([(canvas, campos)], model, lote_id="SEPARADOR")
+
+
 def imagem_para_gfa(img: Image.Image) -> str:
     """Serializa uma imagem 1-bit como campo grafico ZPL ``^GFA`` (hex ASCII).
 
@@ -1000,11 +1163,44 @@ def calibrar_padrao_lote(etiquetas: list, model: LabelModel) -> _PadraoLote:
     return _calibrar_padrao_lote(itens, model)
 
 
+def grupos_consecutivos(itens: list) -> list[list]:
+    """Quebra a lista em RUNS de SKU igual e CONSECUTIVO, sem reordenar nada.
+
+    O arquivo da Shopee ja chega agrupado por SKU; reordenar mudaria uma
+    impressao que hoje sai correta. Se um SKU reaparecer depois de outro, ele
+    vira um grupo novo -- com sua propria separadora, que e' justamente o que o
+    operador precisa ver.
+    """
+    grupos: list[list] = []
+    for it in itens:
+        sku = getattr(it, "sku", "")
+        if grupos and getattr(grupos[-1][0], "sku", "") == sku:
+            grupos[-1].append(it)
+        else:
+            grupos.append([it])
+    return grupos
+
+
+def _info_separador_do_grupo(grupo: list) -> InfoSeparador:
+    primeiro = grupo[0]
+    return InfoSeparador(
+        sku=(getattr(primeiro, "sku", "") or ""),
+        seller_sku=next((getattr(i, "seller_sku", "") for i in grupo if getattr(i, "seller_sku", "")), ""),
+        qtd=len(grupo),
+    )
+
+
 def gerar_zpl_de_etiquetas(etiquetas: list, model: LabelModel, lote_id: str = "LOTE") -> tuple[str, int, int]:
     """Compoe o lote inteiro a partir das EtiquetaZPL parseadas.
 
-    Agrupa em linhas de ``model.colunas`` na ordem do arquivo. Retorna
-    (zpl, qtd_compostas, qtd_ignoradas) — ignoradas = stickers sem QR.
+    Agrupa em linhas de ``model.colunas`` na ordem do arquivo. Com
+    ``model.separador_por_sku``, cada grupo de SKU (run consecutivo) ganha uma
+    LINHA de separadoras antes das suas etiquetas -- e passa a comecar numa
+    linha nova, de modo que nenhuma linha fisica misture dois SKUs (ClickUp
+    86ajaafu3).
+
+    Retorna (zpl, qtd_compostas, qtd_ignoradas) — ignoradas = stickers sem QR.
+    ``qtd_compostas`` conta so etiquetas de produto (separadoras nao entram).
     """
     itens: list[_Item] = []
     ignoradas = 0
@@ -1020,6 +1216,17 @@ def gerar_zpl_de_etiquetas(etiquetas: list, model: LabelModel, lote_id: str = "L
     # de cada uma otimizar seu proprio tamanho (ClickUp 86ajk2mc2).
     padrao = _calibrar_padrao_lote(itens, model)
     linhas: list[tuple[Image.Image, list[_CampoNativo]]] = []
-    for i in range(0, len(itens), model.colunas):
-        linhas.append(compor_linha(itens[i : i + model.colunas], model, padrao=padrao))
+    if getattr(model, "separador_por_sku", False):
+        grupos = grupos_consecutivos(itens)
+        for grupo in grupos:
+            linhas.append(compor_linha_separadora(_info_separador_do_grupo(grupo), model))
+            for i in range(0, len(grupo), model.colunas):
+                linhas.append(compor_linha(grupo[i : i + model.colunas], model, padrao=padrao))
+        log.info(
+            "Lote %s: %d grupos de SKU -> %d linhas de separadora (%d etiquetas cada)",
+            lote_id, len(grupos), len(grupos), model.colunas,
+        )
+    else:
+        for i in range(0, len(itens), model.colunas):
+            linhas.append(compor_linha(itens[i : i + model.colunas], model, padrao=padrao))
     return gerar_zpl(linhas, model, lote_id=lote_id), len(itens), ignoradas

@@ -88,9 +88,72 @@ def _etiqueta_sintetica(sku: str, com_qr: bool = True, seller_sku: str = "") -> 
     return EtiquetaZPL(sku=sku, zpl_raw="", indice=1, seller_sku=seller_sku, metadados=md)
 
 
+class TestSeparadora(unittest.TestCase):
+    """Etiqueta separadora entre grupos de SKU (ClickUp 86ajaafu3)."""
+
+    def setUp(self):
+        self.model = LabelModel(id="x", nome="x", colunas=2, separador_por_sku=True)
+
+    def test_grupos_consecutivos_nao_reordena(self):
+        skus = ["A", "A", "B", "B", "B", "A"]
+        grupos = R.grupos_consecutivos([_etiqueta_sintetica(s) for s in skus])
+        self.assertEqual([[e.sku for e in g] for g in grupos], [["A", "A"], ["B", "B", "B"], ["A"]])
+
+    def test_uma_linha_de_separadoras_por_grupo(self):
+        # 3 de A + 2 de B: 2 grupos -> 2 linhas de separadora + ceil(3/2) + ceil(2/2).
+        etiquetas = [_etiqueta_sintetica("A") for _ in range(3)] + [
+            _etiqueta_sintetica("B") for _ in range(2)
+        ]
+        zpl, n, ign = R.gerar_zpl_de_etiquetas(etiquetas, self.model, "T")
+        self.assertEqual(n, 5)          # separadoras nao contam como etiqueta
+        self.assertEqual(ign, 0)
+        self.assertEqual(zpl.count("^XA"), 2 + 2 + 1)
+        # 2 colunas -> a separadora sai 2x por grupo, 4 titulos no lote.
+        self.assertEqual(zpl.count(f"^FD{R.SEP_TITULO}^FS"), 2 * self.model.colunas)
+
+    def test_grupo_nunca_divide_linha_com_outro_sku(self):
+        # Grupo impar (3 de A) seguido de B: sem a separadora, a 2a linha teria
+        # A na coluna 0 e B na coluna 1.
+        etiquetas = [_etiqueta_sintetica("A", seller_sku="AAA") for _ in range(3)] + [
+            _etiqueta_sintetica("B", seller_sku="BBB") for _ in range(2)
+        ]
+        zpl, _n, _ign = R.gerar_zpl_de_etiquetas(etiquetas, self.model, "T")
+        for bloco in zpl.split("^XA"):
+            if R.SEP_TITULO in bloco:
+                continue
+            self.assertFalse("AAA" in bloco and "BBB" in bloco, "linha misturou dois SKUs")
+
+    def test_desligado_mantem_empacotamento_antigo(self):
+        m = LabelModel(id="x", nome="x", colunas=2, separador_por_sku=False)
+        etiquetas = [_etiqueta_sintetica("A") for _ in range(3)] + [_etiqueta_sintetica("B")]
+        zpl, n, _ign = R.gerar_zpl_de_etiquetas(etiquetas, m, "T")
+        self.assertEqual(n, 4)
+        self.assertEqual(zpl.count("^XA"), 2)  # 4 etiquetas / 2 colunas
+        self.assertNotIn(R.SEP_TITULO, zpl)
+
+    def test_anuncia_seller_sku_e_quantidade(self):
+        info = R.InfoSeparador(sku="290672451234", seller_sku="KCCC-RO", qtd=15)
+        zpl = R.gerar_zpl_separador(info, self.model)
+        self.assertIn("^FDKCCC-RO^FS", zpl)
+        self.assertIn("^FDSKU 290672451234^FS", zpl)
+        self.assertIn("^FDQTD 15^FS", zpl)
+
+    def test_sem_seller_sku_usa_o_sku_shopee_como_codigo(self):
+        info = R.InfoSeparador(sku="290672451234", qtd=4)
+        zpl = R.gerar_zpl_separador(info, self.model)
+        self.assertIn("^FD290672451234^FS", zpl)
+        self.assertNotIn("^FDSKU 290672451234^FS", zpl)  # nao repete o mesmo codigo
+
+    def test_seta_e_moldura_saem_no_bitmap(self):
+        info = R.InfoSeparador(sku="A", seller_sku="AAA", qtd=1)
+        img = R.compor_separador(info, self.model)
+        self.assertEqual(img.size, (self.model.largura_dots, self.model.altura_dots))
+        self.assertGreater(sum(img.convert("L").histogram()[:128]), 0)  # tem tinta
+
+
 class TestGerarZpl(unittest.TestCase):
     def setUp(self):
-        self.model = LabelModel(id="x", nome="x", colunas=2)
+        self.model = LabelModel(id="x", nome="x", colunas=2, separador_por_sku=False)
 
     def test_agrupa_em_linhas_de_2(self):
         etiquetas = [_etiqueta_sintetica(f"SKU{i}") for i in range(5)]  # 5 stickers
