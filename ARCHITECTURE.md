@@ -232,6 +232,12 @@ Aqui estão os detalhes das classes principais a serem pedidas na geração de c
 * **Método Principal:** `agrupar_por_sku(etiquetas: list[dict]) -> dict`
 * **Lógica Interna:** Iterar a lista, usar um `defaultdict(list)` ou estruturar como `{ "SKU1": {"desc": "...", "etiquetas": ["^XA...", "^XA..."], "qtd": 2} }`.
 
+### `faixa_impressao.py`
+
+> **Implementado** (v0.7.0): recorte da fila de impressão para lotes longos — retomar a partir de um grupo de SKU, parar em outro, e/ou limitar a N etiquetas. Fica em módulo próprio (e não no `label_renderer`) porque é lógica de **seleção**, sem geometria de bobina nem render: `montar_fila` (grupos de SKU consecutivos com índices, mesma quebra de `label_renderer.grupos_consecutivos`), `intervalo`/`aplicar` (recorte da lista plana), `resumo` (texto da UI/log) e `blocos_pass_through` (remontagem dos blocos `^XA..^XZ` no modo fiel, avisando as etiquetas de carona quando a folha GRF é indivisível).
+>
+> A unidade da faixa é o **grupo consecutivo de SKU** — o mesmo que a etiqueta separadora anuncia e o que o operador vê saindo fisicamente da impressora. `gerar_zpl_de_etiquetas` recebe o `padrao` calibrado no **lote inteiro** (`label_renderer.calibrar_padrao_lote`), para que o trecho retomado saia na mesma escala de texto do trecho já impresso.
+
 ### `gerador_lote.py` e `separador_zpl.py`
 
 > **Implementado** (ClickUp 86ajaafu3) dentro de `core/label_renderer.py`, não em módulos próprios: a separadora precisa da mesma geometria de bobina (`LabelModel`) e dos mesmos helpers de dimensionamento de texto nativo (`_campo_zpl_nativo`) usados pela etiqueta de produto. Ver `InfoSeparador`, `compor_linha_separadora` e `grupos_consecutivos`. Diferenças em relação ao esboço abaixo: a separadora sai **antes** do grupo (anuncia o SKU seguinte, com seta ↑), é **replicada em todas as colunas** da bobina (uma linha física inteira) e é ligada/desligada por modelo (`LabelModel.separador_por_sku`).

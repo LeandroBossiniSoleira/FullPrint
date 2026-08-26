@@ -25,7 +25,10 @@ class ShopeeZPLApp(ctk.CTk):
         ctk.set_default_color_theme(settings.color_theme)
 
         self.title(f"{settings.app_name} v{settings.app_version}")
-        self.geometry("1100x680")
+        # 720 (e nao 680): a faixa de impressao ocupa duas linhas no rodape e a
+        # altura extra volta pro preview -- e' la que o operador escolhe o SKU
+        # de retomada. Continua dentro de uma tela 1366x768.
+        self.geometry("1100x720")
         self.minsize(960, 600)
 
         self.printer_service = ZebraPrinterService(

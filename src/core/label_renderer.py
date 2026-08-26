@@ -1190,7 +1190,12 @@ def _info_separador_do_grupo(grupo: list) -> InfoSeparador:
     )
 
 
-def gerar_zpl_de_etiquetas(etiquetas: list, model: LabelModel, lote_id: str = "LOTE") -> tuple[str, int, int]:
+def gerar_zpl_de_etiquetas(
+    etiquetas: list,
+    model: LabelModel,
+    lote_id: str = "LOTE",
+    padrao: _PadraoLote | None = None,
+) -> tuple[str, int, int]:
     """Compoe o lote inteiro a partir das EtiquetaZPL parseadas.
 
     Agrupa em linhas de ``model.colunas`` na ordem do arquivo. Com
@@ -1214,7 +1219,11 @@ def gerar_zpl_de_etiquetas(etiquetas: list, model: LabelModel, lote_id: str = "L
     # Calibra o tamanho PADRAO uma vez pra todo o lote (pior caso entre todos
     # os itens) -> todas as etiquetas saem com a mesma "fonte"/escala, em vez
     # de cada uma otimizar seu proprio tamanho (ClickUp 86ajk2mc2).
-    padrao = _calibrar_padrao_lote(itens, model)
+    # ``padrao`` explicito e' obrigatorio quando se imprime um RECORTE do lote
+    # (faixa de impressao): calibrar so no recorte daria uma fonte diferente da
+    # que ja saiu impressa na parte anterior. A UI passa o padrao do lote INTEIRO.
+    if padrao is None:
+        padrao = _calibrar_padrao_lote(itens, model)
     linhas: list[tuple[Image.Image, list[_CampoNativo]]] = []
     if getattr(model, "separador_por_sku", False):
         grupos = grupos_consecutivos(itens)
