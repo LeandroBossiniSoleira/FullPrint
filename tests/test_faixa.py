@@ -135,6 +135,45 @@ class TestResumo(unittest.TestCase):
     def test_sem_lote(self):
         self.assertIn("Nenhum lote", fx.resumo([], fx.Faixa(), 0))
 
+    def test_so_um_grupo(self):
+        faixa = fx.Faixa()
+        faixa.so_grupo(2, len(self.fila))
+        texto = fx.resumo(self.fila, faixa, len(self.etiquetas))
+        self.assertIn("So o grupo 002", texto)
+        self.assertIn("2 de 9 etiquetas", texto)
+
+
+class TestSoGrupo(unittest.TestCase):
+    """Imprimir um grupo isolado (ex.: so o 3o de 4 grupos)."""
+
+    def setUp(self):
+        self.etiquetas = _lote(("A", 10), ("B", 12), ("C", 11), ("D", 10))
+        self.fila = fx.montar_fila(self.etiquetas)
+
+    def _skus(self, ordem: int) -> list[str]:
+        faixa = fx.Faixa()
+        faixa.so_grupo(ordem, len(self.fila))
+        return [et.sku for et in fx.aplicar(self.etiquetas, faixa, self.fila)]
+
+    def test_grupo_do_meio(self):
+        self.assertEqual(self._skus(3), ["C"] * 11)
+
+    def test_primeiro_e_ultimo_grupo(self):
+        self.assertEqual(self._skus(1), ["A"] * 10)
+        self.assertEqual(self._skus(4), ["D"] * 10)
+
+    def test_descarta_limite_anterior(self):
+        faixa = fx.Faixa(inicio=1, fim=4, limite=3)
+        faixa.so_grupo(2, len(self.fila))
+        self.assertIsNone(faixa.limite)
+        self.assertEqual(len(fx.aplicar(self.etiquetas, faixa, self.fila)), 12)
+
+    def test_lote_de_um_grupo_fica_inativo(self):
+        etiquetas = _lote(("A", 5))
+        faixa = fx.Faixa()
+        faixa.so_grupo(1, len(fx.montar_fila(etiquetas)))
+        self.assertFalse(faixa.ativa)
+
 
 class TestPassThrough(unittest.TestCase):
     def test_texto_puro_recorta_bloco_a_bloco(self):

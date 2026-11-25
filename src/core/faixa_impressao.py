@@ -69,6 +69,18 @@ class Faixa:
         self.fim = None
         self.limite = None
 
+    def so_grupo(self, ordem: int, total_grupos: int) -> None:
+        """Seleciona UM unico grupo (inicio = fim = ``ordem``), sem limite.
+
+        Caso de uso: o lote tem 4 grupos e so o 3o precisa sair de novo (ou
+        sair separado). Nas pontas usa ``None`` -- mesma convencao de "Inicio
+        aqui"/"Fim aqui" --, entao num lote de um grupo so a faixa fica inativa
+        (que e' exatamente "imprimir tudo").
+        """
+        self.inicio = None if ordem <= 1 else ordem
+        self.fim = None if ordem >= total_grupos else ordem
+        self.limite = None
+
 
 def montar_fila(etiquetas: list) -> list[ItemFila]:
     """Quebra a lista em grupos de SKU igual e CONSECUTIVO, sem reordenar.
@@ -174,7 +186,11 @@ def resumo(fila: list[ItemFila], faixa: Faixa, total_etiquetas: int) -> str:
         ate = f"{ultimo.rotulo()} (parcial)"
     else:
         ate = ultimo.rotulo()
-    partes = [f"De {primeiro.rotulo()} ate {ate}"]
+    if len(alcancados) == 1 and len(fila) > 1:
+        parcial = " (parcial)" if primeiro.fim > fim_plano else ""
+        partes = [f"So o grupo {primeiro.rotulo()}{parcial}"]
+    else:
+        partes = [f"De {primeiro.rotulo()} ate {ate}"]
     if faixa.limite is not None:
         partes.append(f"max {faixa.limite} etiquetas")
     partes.append(

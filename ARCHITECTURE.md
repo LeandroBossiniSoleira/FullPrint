@@ -234,7 +234,7 @@ Aqui estão os detalhes das classes principais a serem pedidas na geração de c
 
 ### `faixa_impressao.py`
 
-> **Implementado** (v0.7.0): recorte da fila de impressão para lotes longos — retomar a partir de um grupo de SKU, parar em outro, e/ou limitar a N etiquetas. Fica em módulo próprio (e não no `label_renderer`) porque é lógica de **seleção**, sem geometria de bobina nem render: `montar_fila` (grupos de SKU consecutivos com índices, mesma quebra de `label_renderer.grupos_consecutivos`), `intervalo`/`aplicar` (recorte da lista plana), `resumo` (texto da UI/log) e `blocos_pass_through` (remontagem dos blocos `^XA..^XZ` no modo fiel, avisando as etiquetas de carona quando a folha GRF é indivisível).
+> **Implementado** (v0.7.0): recorte da fila de impressão para lotes longos — retomar a partir de um grupo de SKU, parar em outro, imprimir **um grupo isolado** (`Faixa.so_grupo`, botão "Só este grupo" / clique direito no preview) e/ou limitar a N etiquetas. Fica em módulo próprio (e não no `label_renderer`) porque é lógica de **seleção**, sem geometria de bobina nem render: `montar_fila` (grupos de SKU consecutivos com índices, mesma quebra de `label_renderer.grupos_consecutivos`), `intervalo`/`aplicar` (recorte da lista plana), `resumo` (texto da UI/log) e `blocos_pass_through` (remontagem dos blocos `^XA..^XZ` no modo fiel, avisando as etiquetas de carona quando a folha GRF é indivisível).
 >
 > A unidade da faixa é o **grupo consecutivo de SKU** — o mesmo que a etiqueta separadora anuncia e o que o operador vê saindo fisicamente da impressora. `gerar_zpl_de_etiquetas` recebe o `padrao` calibrado no **lote inteiro** (`label_renderer.calibrar_padrao_lote`), para que o trecho retomado saia na mesma escala de texto do trecho já impresso.
 

@@ -214,7 +214,7 @@ class MainView(ctk.CTkFrame):
         """
         barra = ctk.CTkFrame(parent, fg_color="transparent")
         barra.grid(row=0, column=0, sticky="ew")
-        barra.grid_columnconfigure(6, weight=1)
+        barra.grid_columnconfigure(7, weight=1)
 
         ctk.CTkLabel(
             barra, text="Faixa:", font=ctk.CTkFont(weight="bold")
@@ -237,15 +237,22 @@ class MainView(ctk.CTkFrame):
             fg_color="gray30", hover_color="gray25",
             command=self._on_faixa_limpar,
         )
-        self.btn_faixa_limpar.grid(row=0, column=3, padx=3)
+        self.btn_faixa_limpar.grid(row=0, column=4, padx=3)
+
+        # Imprimir um grupo isolado (ex.: so o 3o de 4 grupos): inicio = fim.
+        self.btn_faixa_grupo = ctk.CTkButton(
+            barra, text="So este grupo", width=110, height=28, state="disabled",
+            command=self._on_faixa_so_grupo,
+        )
+        self.btn_faixa_grupo.grid(row=0, column=3, padx=3)
 
         ctk.CTkLabel(barra, text="Max. etiquetas:").grid(
-            row=0, column=4, padx=(16, 6), sticky="e"
+            row=0, column=5, padx=(16, 6), sticky="e"
         )
         self.ent_faixa_limite = ctk.CTkEntry(
             barra, width=80, height=28, placeholder_text="todas"
         )
-        self.ent_faixa_limite.grid(row=0, column=5)
+        self.ent_faixa_limite.grid(row=0, column=6)
         self.ent_faixa_limite.bind("<Return>", self._on_faixa_limite)
         self.ent_faixa_limite.bind("<FocusOut>", self._on_faixa_limite)
 
@@ -309,6 +316,35 @@ class MainView(ctk.CTkFrame):
             self._faixa.inicio = None
         self._aplicar_faixa(f"Faixa: termina no grupo {grupo.rotulo()}.")
 
+    def _on_faixa_so_grupo(self) -> None:
+        grupo = self._grupo_da_selecao()
+        if grupo is None:
+            messagebox.showinfo(
+                "Faixa", "Selecione no preview o SKU (grupo) que deve ser impresso.",
+                parent=self,
+            )
+            return
+        self._faixa.so_grupo(grupo.ordem, len(self._fila))
+        # so_grupo zera o limite: o campo tem que refletir isso.
+        self.ent_faixa_limite.delete(0, "end")
+        self._aplicar_faixa(
+            f"Faixa: so o grupo {grupo.rotulo()} ({grupo.qtd} etiqueta(s))."
+        )
+
+    def _on_menu_preview(self, event) -> None:
+        """Clique direito numa linha do preview: seleciona e abre o menu da faixa."""
+        if self._busy or not self._fila:
+            return
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        self.tree.selection_set(iid)
+        self.tree.focus(iid)
+        try:
+            self._menu_preview.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._menu_preview.grab_release()
+
     def _on_faixa_limpar(self) -> None:
         self._faixa.limpar()
         self.ent_faixa_limite.delete(0, "end")
@@ -355,7 +391,9 @@ class MainView(ctk.CTkFrame):
 
     def _atualizar_rotulo_faixa(self) -> None:
         habilitado = "normal" if (self._fila and not self._busy) else "disabled"
-        for btn in (self.btn_faixa_inicio, self.btn_faixa_fim, self.btn_faixa_limpar):
+        for btn in (
+            self.btn_faixa_inicio, self.btn_faixa_fim, self.btn_faixa_grupo, self.btn_faixa_limpar
+        ):
             btn.configure(state=habilitado)
         if not self._fila:
             self.lbl_faixa.configure(text="Processe um arquivo para definir a faixa.")
@@ -449,6 +487,15 @@ class MainView(ctk.CTkFrame):
         self.tree.bind("<Double-Button-1>", self._on_editar_seller_sku)
         # Selecao mostra a imagem real do sticker (recortada do bitmap GRF)
         self.tree.bind("<<TreeviewSelect>>", self._on_selecionar_linha)
+        # Clique direito: atalhos da faixa (so este grupo / inicio / fim / lote todo).
+        self._menu_preview = tk.Menu(self.tree, tearoff=0)
+        self._menu_preview.add_command(label="Imprimir so este grupo", command=self._on_faixa_so_grupo)
+        self._menu_preview.add_separator()
+        self._menu_preview.add_command(label="Inicio aqui", command=self._on_faixa_inicio_aqui)
+        self._menu_preview.add_command(label="Fim aqui", command=self._on_faixa_fim_aqui)
+        self._menu_preview.add_command(label="Lote todo", command=self._on_faixa_limpar)
+        self.tree.bind("<Button-3>", self._on_menu_preview)
+        self.tree.bind("<Button-2>", self._on_menu_preview)  # macOS
 
         vsb = ttk.Scrollbar(container, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -580,7 +627,9 @@ class MainView(ctk.CTkFrame):
         ocr_ok = (not busy) and bool(self._etiquetas_atuais) and ocr_seller.is_available()
         self.btn_ocr.configure(state="normal" if ocr_ok else "disabled")
         estado_faixa = "disabled" if (busy or not self._fila) else "normal"
-        for btn in (self.btn_faixa_inicio, self.btn_faixa_fim, self.btn_faixa_limpar):
+        for btn in (
+            self.btn_faixa_inicio, self.btn_faixa_fim, self.btn_faixa_grupo, self.btn_faixa_limpar
+        ):
             btn.configure(state=estado_faixa)
 
     # ------------------------------------------------------------------- acoes
