@@ -11,7 +11,7 @@ import customtkinter as ctk
 from PIL import Image, ImageTk
 
 from ...config.settings import Settings
-from ...core import grf_decoder, label_renderer, ocr_seller, zpl_renderer
+from ...core import faixa_impressao, grf_decoder, label_renderer, ocr_seller, zpl_renderer
 from ...core.agrupador import EtiquetaAgrupador
 from ...core.label_models import MODO_PASS_THROUGH, LabelModelStore
 from ...core.parser import ShopeePDFParser, ShopeeZPLParser
@@ -80,6 +80,15 @@ class MainView(ctk.CTkFrame):
         self._preview_seq = 0       # token anti-corrida do render assincrono de ZPL
         self._et_selecionada = None  # etiqueta atual (alvo do "Interpretar ZPL")
         self._modo_preview = "Por SKU"
+        # Fila = grupos de SKU CONSECUTIVOS na ordem em que serao impressos (a
+        # mesma unidade anunciada pela etiqueta separadora). A faixa recorta
+        # essa fila: retomar a partir de um SKU, parar em outro, ou limitar a N
+        # etiquetas -- essencial em lotes longos (bobina acabou, parada no meio),
+        # onde reimprimir o lote inteiro nao e' opcao.
+        self._fila: list[faixa_impressao.ItemFila] = []
+        self._faixa = faixa_impressao.Faixa()
+        self._iid_grupo: dict[str, faixa_impressao.ItemFila] = {}
+        self._iid_indice: dict[str, int] = {}
         self._busy = False
         self._log_lines = 0
 
@@ -173,8 +182,17 @@ class MainView(ctk.CTkFrame):
         rodape.grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 12))
         rodape.grid_columnconfigure(0, weight=1)
 
-        self.lbl_resumo = ctk.CTkLabel(rodape, text="Aguardando arquivo.", anchor="w")
-        self.lbl_resumo.grid(row=0, column=0, padx=12, pady=10, sticky="ew")
+        # Coluna esquerda do rodape: faixa (controles + resumo) e resumo do lote.
+        # Fica aqui, e nao numa linha propria do layout, pra nao roubar altura do
+        # preview -- que e' onde o operador escolhe o SKU de retomada.
+        info = ctk.CTkFrame(rodape, fg_color="transparent")
+        info.grid(row=0, column=0, padx=(12, 6), pady=8, sticky="ew")
+        info.grid_columnconfigure(0, weight=1)
+
+        self._build_faixa(info)
+
+        self.lbl_resumo = ctk.CTkLabel(info, text="Aguardando arquivo.", anchor="w")
+        self.lbl_resumo.grid(row=2, column=0, pady=(2, 0), sticky="ew")
 
         self.btn_imprimir = ctk.CTkButton(
             rodape,
@@ -186,6 +204,229 @@ class MainView(ctk.CTkFrame):
             state="disabled",
         )
         self.btn_imprimir.grid(row=0, column=1, padx=12, pady=10)
+
+    def _build_faixa(self, parent: ctk.CTkFrame) -> None:
+        """Controles da faixa de impressao: onde comecar/retomar e quanto imprimir.
+
+        Fluxo pensado para velocidade no operador: clica no SKU no preview e
+        aperta "Inicio aqui" -- nada de digitar codigo. "Max. etiquetas" cobre o
+        caso "cabe mais N nesta bobina".
+        """
+        barra = ctk.CTkFrame(parent, fg_color="transparent")
+        barra.grid(row=0, column=0, sticky="ew")
+        barra.grid_columnconfigure(7, weight=1)
+
+        ctk.CTkLabel(
+            barra, text="Faixa:", font=ctk.CTkFont(weight="bold")
+        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+
+        self.btn_faixa_inicio = ctk.CTkButton(
+            barra, text="Inicio aqui", width=100, height=28, state="disabled",
+            command=self._on_faixa_inicio_aqui,
+        )
+        self.btn_faixa_inicio.grid(row=0, column=1, padx=3)
+
+        self.btn_faixa_fim = ctk.CTkButton(
+            barra, text="Fim aqui", width=90, height=28, state="disabled",
+            command=self._on_faixa_fim_aqui,
+        )
+        self.btn_faixa_fim.grid(row=0, column=2, padx=3)
+
+        self.btn_faixa_limpar = ctk.CTkButton(
+            barra, text="Lote todo", width=90, height=28, state="disabled",
+            fg_color="gray30", hover_color="gray25",
+            command=self._on_faixa_limpar,
+        )
+        self.btn_faixa_limpar.grid(row=0, column=4, padx=3)
+
+        # Imprimir um grupo isolado (ex.: so o 3o de 4 grupos): inicio = fim.
+        self.btn_faixa_grupo = ctk.CTkButton(
+            barra, text="So este grupo", width=110, height=28, state="disabled",
+            command=self._on_faixa_so_grupo,
+        )
+        self.btn_faixa_grupo.grid(row=0, column=3, padx=3)
+
+        ctk.CTkLabel(barra, text="Max. etiquetas:").grid(
+            row=0, column=5, padx=(16, 6), sticky="e"
+        )
+        self.ent_faixa_limite = ctk.CTkEntry(
+            barra, width=80, height=28, placeholder_text="todas"
+        )
+        self.ent_faixa_limite.grid(row=0, column=6)
+        self.ent_faixa_limite.bind("<Return>", self._on_faixa_limite)
+        self.ent_faixa_limite.bind("<FocusOut>", self._on_faixa_limite)
+
+        # Resumo em linha propria: o texto e' longo ("De 003 · X ate 005 · Y
+        # (parcial) | max 300 etiquetas | ...") e truncava ao lado dos botoes.
+        self.lbl_faixa = ctk.CTkLabel(
+            parent,
+            text="Processe um arquivo para definir a faixa.",
+            anchor="w",
+            justify="left",
+            text_color="#9a9a9a",
+        )
+        self.lbl_faixa.grid(row=1, column=0, pady=(6, 0), sticky="ew")
+
+    # ------------------------------------------------------------------- faixa
+    def _grupo_da_selecao(self) -> "faixa_impressao.ItemFila | None":
+        """Grupo de SKU da linha selecionada no preview.
+
+        Funciona nos dois modos: em "Por SKU" a linha JA e' um grupo (inclusive
+        a linha de separadora); em "Individual" acha o grupo que contem aquela
+        etiqueta.
+        """
+        sel = self.tree.selection()
+        if not sel or not self._fila:
+            return None
+        iid = sel[0]
+        grupo = self._iid_grupo.get(iid)
+        if grupo is not None:
+            return grupo
+        idx = self._iid_indice.get(iid)
+        if idx is None:
+            return None
+        return next((g for g in self._fila if g.inicio <= idx < g.fim), None)
+
+    def _on_faixa_inicio_aqui(self) -> None:
+        grupo = self._grupo_da_selecao()
+        if grupo is None:
+            messagebox.showinfo(
+                "Faixa", "Selecione no preview o SKU onde a impressao deve comecar.",
+                parent=self,
+            )
+            return
+        # Apontar o 1o grupo = "sem restricao de inicio" (None), pra faixa e
+        # rotulo refletirem que nada foi cortado desse lado.
+        self._faixa.inicio = None if grupo.ordem <= 1 else grupo.ordem
+        # Fim antes do inicio nao faz sentido -> solta o fim (vai ate o final).
+        if self._faixa.fim is not None and self._faixa.fim < grupo.ordem:
+            self._faixa.fim = None
+        self._aplicar_faixa(f"Faixa: comeca no grupo {grupo.rotulo()}.")
+
+    def _on_faixa_fim_aqui(self) -> None:
+        grupo = self._grupo_da_selecao()
+        if grupo is None:
+            messagebox.showinfo(
+                "Faixa", "Selecione no preview o SKU onde a impressao deve parar.",
+                parent=self,
+            )
+            return
+        self._faixa.fim = None if grupo.ordem >= len(self._fila) else grupo.ordem
+        if self._faixa.inicio is not None and self._faixa.inicio > grupo.ordem:
+            self._faixa.inicio = None
+        self._aplicar_faixa(f"Faixa: termina no grupo {grupo.rotulo()}.")
+
+    def _on_faixa_so_grupo(self) -> None:
+        grupo = self._grupo_da_selecao()
+        if grupo is None:
+            messagebox.showinfo(
+                "Faixa", "Selecione no preview o SKU (grupo) que deve ser impresso.",
+                parent=self,
+            )
+            return
+        self._faixa.so_grupo(grupo.ordem, len(self._fila))
+        # so_grupo zera o limite: o campo tem que refletir isso.
+        self.ent_faixa_limite.delete(0, "end")
+        self._aplicar_faixa(
+            f"Faixa: so o grupo {grupo.rotulo()} ({grupo.qtd} etiqueta(s))."
+        )
+
+    def _on_menu_preview(self, event) -> None:
+        """Clique direito numa linha do preview: seleciona e abre o menu da faixa."""
+        if self._busy or not self._fila:
+            return
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        self.tree.selection_set(iid)
+        self.tree.focus(iid)
+        try:
+            self._menu_preview.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._menu_preview.grab_release()
+
+    def _on_faixa_limpar(self) -> None:
+        self._faixa.limpar()
+        self.ent_faixa_limite.delete(0, "end")
+        self._aplicar_faixa("Faixa limpa: lote completo.")
+
+    def _on_faixa_limite(self, _event=None) -> None:
+        anterior = self._faixa.limite
+        self._ler_limite()
+        if self._faixa.limite != anterior:
+            alvo = self._faixa.limite
+            self._aplicar_faixa(
+                f"Faixa: limite de {alvo} etiquetas." if alvo else "Faixa: sem limite de etiquetas."
+            )
+
+    def _ler_limite(self) -> None:
+        """Le o campo "Max. etiquetas" para a faixa. Valor invalido/vazio = sem
+        limite (o campo e' normalizado para o que foi realmente aplicado)."""
+        texto = self.ent_faixa_limite.get().strip()
+        if not texto:
+            self._faixa.limite = None
+            return
+        try:
+            valor = int(texto.replace(".", "").replace(" ", ""))
+        except ValueError:
+            self._faixa.limite = None
+            self.ent_faixa_limite.delete(0, "end")
+            self.log_status("aviso", f"Limite de etiquetas invalido ('{texto}'): ignorado.")
+            return
+        self._faixa.limite = valor if valor > 0 else None
+        if valor <= 0:
+            self.ent_faixa_limite.delete(0, "end")
+
+    def _aplicar_faixa(self, mensagem: str | None = None) -> None:
+        """Re-marca o preview e atualiza rotulos/botao apos mudar a faixa."""
+        self._marcar_faixa_no_preview()
+        self._atualizar_rotulo_faixa()
+        if mensagem:
+            self.log_status("info", mensagem)
+
+    def _etiquetas_da_faixa(self) -> list:
+        """Etiquetas que serao impressas agora (recorte da faixa)."""
+        self._ler_limite()
+        return faixa_impressao.aplicar(self._etiquetas_atuais, self._faixa, self._fila)
+
+    def _atualizar_rotulo_faixa(self) -> None:
+        habilitado = "normal" if (self._fila and not self._busy) else "disabled"
+        for btn in (
+            self.btn_faixa_inicio, self.btn_faixa_fim, self.btn_faixa_grupo, self.btn_faixa_limpar
+        ):
+            btn.configure(state=habilitado)
+        if not self._fila:
+            self.lbl_faixa.configure(text="Processe um arquivo para definir a faixa.")
+            self.btn_imprimir.configure(text="Imprimir Lote")
+            return
+        total = len(self._etiquetas_atuais)
+        self.lbl_faixa.configure(text=faixa_impressao.resumo(self._fila, self._faixa, total))
+        n = len(faixa_impressao.intervalo(self._etiquetas_atuais, self._faixa, self._fila))
+        rotulo = f"Imprimir Faixa ({n})" if self._faixa.ativa else f"Imprimir Lote ({n})"
+        self.btn_imprimir.configure(text=rotulo)
+        if not self._busy:
+            self.btn_imprimir.configure(state="normal" if n else "disabled")
+
+    def _marcar_faixa_no_preview(self) -> None:
+        """Escurece no preview as linhas que ficam FORA da faixa -- o operador
+        confere de relance o que vai sair antes de mandar imprimir."""
+        if not self._fila:
+            return
+        alvo = faixa_impressao.intervalo(self._etiquetas_atuais, self._faixa, self._fila)
+        for iid in self.tree.get_children():
+            grupo = self._iid_grupo.get(iid)
+            if grupo is not None:
+                # Grupo entra se sobrepoe o intervalo (pode entrar parcial, quando
+                # o limite de etiquetas corta no meio dele).
+                dentro = grupo.inicio < alvo.stop and grupo.fim > alvo.start
+            else:
+                idx = self._iid_indice.get(iid)
+                dentro = idx is not None and idx in alvo
+            tags = list(self.tree.item(iid, "tags"))
+            tags = [t for t in tags if t != "fora"]
+            if not dentro:
+                tags.append("fora")
+            self.tree.item(iid, tags=tags)
 
     def _build_preview_tree(self, parent: ctk.CTkFrame) -> None:
         """Treeview ttk nativo: muito mais leve que centenas de CTkLabel."""
@@ -239,10 +480,22 @@ class MainView(ctk.CTkFrame):
         self.tree.column("sku", anchor="w")
         self.tree.column("qtd", width=60, anchor="e", stretch=False)
 
+        # Linhas fora da faixa de impressao: cinza apagado (nao serao impressas).
+        self.tree.tag_configure("fora", foreground="#6a6a6a")
+
         # Duplo-clique numa linha abre dialog pra editar/cadastrar o Seller SKU
         self.tree.bind("<Double-Button-1>", self._on_editar_seller_sku)
         # Selecao mostra a imagem real do sticker (recortada do bitmap GRF)
         self.tree.bind("<<TreeviewSelect>>", self._on_selecionar_linha)
+        # Clique direito: atalhos da faixa (so este grupo / inicio / fim / lote todo).
+        self._menu_preview = tk.Menu(self.tree, tearoff=0)
+        self._menu_preview.add_command(label="Imprimir so este grupo", command=self._on_faixa_so_grupo)
+        self._menu_preview.add_separator()
+        self._menu_preview.add_command(label="Inicio aqui", command=self._on_faixa_inicio_aqui)
+        self._menu_preview.add_command(label="Fim aqui", command=self._on_faixa_fim_aqui)
+        self._menu_preview.add_command(label="Lote todo", command=self._on_faixa_limpar)
+        self.tree.bind("<Button-3>", self._on_menu_preview)
+        self.tree.bind("<Button-2>", self._on_menu_preview)  # macOS
 
         vsb = ttk.Scrollbar(container, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -373,6 +626,11 @@ class MainView(ctk.CTkFrame):
         # OCR so com lote processado, fora de processamento e com Tesseract.
         ocr_ok = (not busy) and bool(self._etiquetas_atuais) and ocr_seller.is_available()
         self.btn_ocr.configure(state="normal" if ocr_ok else "disabled")
+        estado_faixa = "disabled" if (busy or not self._fila) else "normal"
+        for btn in (
+            self.btn_faixa_inicio, self.btn_faixa_fim, self.btn_faixa_grupo, self.btn_faixa_limpar
+        ):
+            btn.configure(state=estado_faixa)
 
     # ------------------------------------------------------------------- acoes
     def _on_trocar_modo(self, valor: str) -> None:
@@ -401,6 +659,10 @@ class MainView(ctk.CTkFrame):
         self._etiquetas_atuais = []
         self._grupos_atuais = None
         self._iid_etiqueta = {}
+        self._fila = []
+        self._faixa.limpar()
+        self._iid_grupo = {}
+        self._iid_indice = {}
         self._et_selecionada = None
         self.btn_interpretar.configure(state="disabled")
         self.btn_ocr.configure(state="disabled")
@@ -409,6 +671,8 @@ class MainView(ctk.CTkFrame):
         self.lbl_arquivo.configure(text=str(self._arquivo_atual))
         self.btn_processar.configure(state="normal")
         self.btn_imprimir.configure(state="disabled")
+        self.ent_faixa_limite.delete(0, "end")
+        self._atualizar_rotulo_faixa()
         self.log_status("info", f"Arquivo selecionado: {self._arquivo_atual.name}")
 
     def _progresso_parse(self, mensagem: str) -> None:
@@ -454,6 +718,11 @@ class MainView(ctk.CTkFrame):
         self._lote_bytes = dados
         self._etiquetas_atuais = etiquetas
         self._grupos_atuais = grupos
+        # Fila de impressao (grupos consecutivos) + faixa zerada: lote novo
+        # comeca sempre imprimindo tudo.
+        self._fila = faixa_impressao.montar_fila(etiquetas)
+        self._faixa.limpar()
+        self.ent_faixa_limite.delete(0, "end")
         self._recalibrar_padrao_lote()
         self._renderizar_preview()
 
@@ -469,6 +738,7 @@ class MainView(ctk.CTkFrame):
             resumo = f"{len(grupos)} SKUs  |  {blocos} etiquetas  |  Arquivo: {nome}"
         self.lbl_resumo.configure(text=resumo)
         self.btn_imprimir.configure(state="normal")
+        self._atualizar_rotulo_faixa()
         # Habilita o pre-preenchimento via OCR se houver Tesseract disponivel.
         if ocr_seller.is_available():
             self.btn_ocr.configure(state="normal")
@@ -492,6 +762,8 @@ class MainView(ctk.CTkFrame):
         self.tree.delete(*self.tree.get_children())
         self._iid_etiqueta = {}
         self._iid_separador = {}
+        self._iid_grupo = {}
+        self._iid_indice = {}
         if self._modo_preview == "Individual":
             itens = self._etiquetas_atuais
             total = len(itens)
@@ -499,6 +771,9 @@ class MainView(ctk.CTkFrame):
             for i, et in enumerate(itens[:exibir], start=1):
                 iid = f"sku::{et.sku}::{i}"
                 self._iid_etiqueta[iid] = et
+                # Indice na lista plana: usado pela faixa (achar o grupo desta
+                # etiqueta e marcar dentro/fora).
+                self._iid_indice[iid] = i - 1
                 self.tree.insert(
                     "",
                     "end",
@@ -507,56 +782,65 @@ class MainView(ctk.CTkFrame):
                 )
             unidade = "stickers"
         else:
-            grupos = self._grupos_atuais or {}
-            itens = list(grupos.values())
+            # Lista a FILA (grupos de SKU consecutivos), nao o dicionario de SKUs
+            # distintos: uma linha do preview = um grupo que sai impresso, na
+            # ordem exata da impressao. E' o que faz a faixa ("comeca aqui")
+            # bater com o rolo que o operador tem na mao.
+            itens = self._fila
             total = len(itens)
             exibir = min(total, MAX_PREVIEW_ROWS)
-            # 1a etiqueta de cada SKU: fonte da imagem do sticker no painel.
-            primeira_por_sku: dict[str, object] = {}
-            for et in self._etiquetas_atuais:
-                if et.sku not in primeira_por_sku:
-                    primeira_por_sku[et.sku] = et
             modelo = self.label_store.ativo()
             com_separadora = self._separadora_ativa()
-            for i, grupo in enumerate(itens[:exibir], start=1):
+            for grupo in itens[:exibir]:
                 if com_separadora:
                     # Espelha a impressao: 1 linha CHEIA de separadoras (uma por
                     # coluna da bobina) antes das etiquetas do grupo.
-                    iid_sep = f"sep::{grupo.sku}"
+                    iid_sep = f"sep::{grupo.ordem}"
                     self._iid_separador[iid_sep] = label_renderer.InfoSeparador(
                         sku=grupo.sku,
                         seller_sku=self.catalog.get(grupo.sku) or grupo.seller_sku,
                         qtd=grupo.qtd,
                     )
+                    # A separadora tambem aponta pro grupo: selecionar ela e
+                    # marcar "Inicio aqui" comeca no grupo que ela anuncia.
+                    self._iid_grupo[iid_sep] = grupo
                     self.tree.insert(
                         "",
                         "end",
                         iid=iid_sep,
                         values=("---", "SEPARADORA", f"-> {grupo.sku}", modelo.colunas),
                     )
-                iid = f"sku::{grupo.sku}"
-                self._iid_etiqueta[iid] = primeira_por_sku.get(grupo.sku)
+                iid = f"grp::{grupo.ordem}"
+                self._iid_etiqueta[iid] = self._etiquetas_atuais[grupo.inicio]
+                self._iid_grupo[iid] = grupo
                 self.tree.insert(
                     "",
                     "end",
                     iid=iid,
-                    values=(f"{i:03d}", self._seller_label(grupo.sku), grupo.sku, grupo.qtd),
+                    values=(
+                        f"{grupo.ordem:03d}",
+                        self._seller_label(grupo.sku),
+                        grupo.sku,
+                        grupo.qtd,
+                    ),
                 )
-            unidade = "SKUs"
+            unidade = "grupos de SKU"
         if total > exibir:
             self.log_status(
                 "aviso",
                 f"Preview limitado a {exibir} de {total} {unidade} (lote inteiro sera impresso).",
             )
+        # Re-aplica a faixa nas linhas recem-criadas (marcacao + rotulo/botao).
+        self._aplicar_faixa()
 
     def _on_editar_seller_sku(self, _event) -> None:
         sel = self.tree.selection()
         if not sel:
             return
-        iid = sel[0]
-        if not iid.startswith("sku::"):
-            return
-        sku_numerico = iid.split("::")[1]
+        et = self._iid_etiqueta.get(sel[0])
+        if et is None:
+            return  # linha de separadora: nao tem Seller SKU proprio
+        sku_numerico = et.sku
         atual = self.catalog.get(sku_numerico) or ""
         novo = simpledialog.askstring(
             "Seller SKU",
@@ -574,6 +858,8 @@ class MainView(ctk.CTkFrame):
                 et.seller_sku = novo
         # O padrao do lote depende de quais itens tem Seller SKU mapeado -> recalibra.
         self._recalibrar_padrao_lote()
+        # Refaz a fila: o rotulo do grupo na faixa usa o Seller SKU.
+        self._fila = faixa_impressao.montar_fila(self._etiquetas_atuais)
         # Re-renderiza preview pra mostrar o novo valor na coluna.
         self._renderizar_preview()
         self.log_status(
@@ -628,6 +914,7 @@ class MainView(ctk.CTkFrame):
             if valor:
                 et.seller_sku = valor
         self._recalibrar_padrao_lote()
+        self._fila = faixa_impressao.montar_fila(self._etiquetas_atuais)
         self._renderizar_preview()
         self.log_status(
             "ok",
@@ -649,6 +936,19 @@ class MainView(ctk.CTkFrame):
             self._etiquetas_atuais[0].metadados.get("fonte") == "pdf"
         )
 
+    def _nome_job(self, lote_id: str) -> str:
+        """Nome do job: marca a faixa para o log (e o arquivo do simulador)
+        identificarem qual pedaco do lote foi impresso."""
+        if not self._faixa.ativa:
+            return f"Lote-{lote_id}"
+        grupos = faixa_impressao.grupos_na_faixa(self._fila, self._faixa)
+        de = grupos[0].ordem if grupos else 1
+        ate = grupos[-1].ordem if grupos else 1
+        sufixo = f"g{de:03d}-{ate:03d}"
+        if self._faixa.limite is not None:
+            sufixo += f"-max{self._faixa.limite}"
+        return f"Lote-{lote_id}-{sufixo}"
+
     def _on_imprimir(self) -> None:
         if self._busy or not self._lote_bytes:
             return
@@ -659,16 +959,54 @@ class MainView(ctk.CTkFrame):
         modelo = self.label_store.ativo()
         lote_pdf = self._lote_e_pdf()
 
+        # Recorte da faixa: o que sai nesta impressao (lote todo se nao houver faixa).
+        etiquetas = self._etiquetas_da_faixa()
+        if not etiquetas:
+            messagebox.showwarning(
+                "Faixa vazia",
+                "A faixa selecionada nao inclui nenhuma etiqueta. Ajuste o inicio/fim "
+                "ou clique em 'Lote todo'.",
+                parent=self,
+            )
+            return
+        if self._faixa.ativa:
+            self.log_status(
+                "info",
+                f"Faixa ativa -> {faixa_impressao.resumo(self._fila, self._faixa, len(self._etiquetas_atuais))}",
+            )
+
         if modelo.modo == MODO_PASS_THROUGH and not lote_pdf:
-            # Fiel: envia os bytes ORIGINAIS do arquivo (sem re-render/re-encode).
-            job = PrintJob(printer_name=impressora, job_name=f"Lote-{lote_id}", zpl_content=self._lote_bytes)
+            if not self._faixa.ativa:
+                # Fiel sem faixa: envia os bytes ORIGINAIS (sem re-render/re-encode).
+                conteudo: str | bytes = self._lote_bytes
+            else:
+                # Fiel com faixa: nao da pra cortar bytes no meio -- remonta so os
+                # blocos ^XA..^XZ do recorte. Folha GRF com varios stickers e'
+                # indivisivel, entao pode sair etiqueta de carona (avisada abaixo).
+                conteudo, extras = faixa_impressao.blocos_pass_through(
+                    self._etiquetas_atuais, etiquetas
+                )
+                if not conteudo.strip():
+                    messagebox.showwarning(
+                        "Faixa sem ZPL",
+                        "Nao foi possivel recortar o arquivo original nesta faixa. "
+                        "Use um modelo composto ou imprima o lote todo.",
+                        parent=self,
+                    )
+                    return
+                if extras:
+                    self.log_status(
+                        "aviso",
+                        f"Modo fiel: {extras} etiqueta(s) fora da faixa sairao junto "
+                        "(a folha 10x15 original tem varios stickers e nao pode ser cortada).",
+                    )
+            job = PrintJob(printer_name=impressora, job_name=self._nome_job(lote_id), zpl_content=conteudo)
             self.log_status("info", f"Lote {lote_id} (fiel) enviado para fila de impressao.")
         else:
             if modelo.modo == MODO_PASS_THROUGH and lote_pdf:
                 self.log_status(
                     "aviso", "PDF nao tem modo fiel; sera composto no layout do modelo ativo."
                 )
-            etiquetas = self._etiquetas_atuais
             if not lote_pdf:
                 sem_qr = sum(1 for et in etiquetas if et.metadados.get("sticker") is None)
                 if sem_qr:
@@ -696,11 +1034,17 @@ class MainView(ctk.CTkFrame):
                     )
 
             # Compor no worker (off-UI): recorta QRs/textos e monta o ZPL ^GFA.
+            # padrao = calibragem do LOTE INTEIRO (nao do recorte): retomar do
+            # meio tem que sair na mesma fonte/escala do que ja foi impresso.
+            padrao = self._padrao_lote
+
             def builder() -> str:
-                zpl, n, ign = label_renderer.gerar_zpl_de_etiquetas(etiquetas, modelo, lote_id=lote_id)
+                zpl, n, ign = label_renderer.gerar_zpl_de_etiquetas(
+                    etiquetas, modelo, lote_id=lote_id, padrao=padrao
+                )
                 return zpl
 
-            job = PrintJob(printer_name=impressora, job_name=f"Lote-{lote_id}", builder=builder)
+            job = PrintJob(printer_name=impressora, job_name=self._nome_job(lote_id), builder=builder)
             self.log_status(
                 "info", f"Lote {lote_id} (composto: {modelo.nome}) enviado para fila de impressao."
             )

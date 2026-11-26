@@ -30,6 +30,7 @@ O arquivo `.txt`/`.zpl` exportado. Pode ser impresso de dois jeitos, conforme o 
 - **Impressão pass-through** (TXT/ZPL, modelo fiel 10x15): os bytes originais vão direto para a impressora (RAW), sem decode/re-encode — fidelidade por construção.
 - **Impressão composta** (TXT/ZPL ou PDF): re-monta as etiquetas no tamanho/layout da sua bobina, com **1 bloco de impressão por linha**.
 - **Etiqueta separadora entre grupos de SKU**: antes das etiquetas de cada SKU sai uma **linha cheia de separadoras** (uma por coluna da bobina) com seta ↑, o Seller SKU, o SKU Shopee e a quantidade do grupo. O grupo passa a começar numa linha nova, então nenhuma linha física mistura dois SKUs — a separação das pilhas sai direto na colagem, sem re-triagem depois da impressão. Liga/desliga por modelo em "Configurar..." (ClickUp 86ajaafu3).
+- **Faixa de impressão (retomar de um SKU / limitar a quantidade)**: em lote longo, a impressão pode parar no meio (bobina acabou, travou, fim de turno). Selecione no preview o grupo de SKU onde parou e clique em **"Início aqui"** — a impressão recomeça dali até o fim da fila. Para imprimir **um grupo isolado** (ex.: só o 3º de 4 grupos), selecione a linha e clique em **"Só este grupo"** — ou clique com o **botão direito** na linha e escolha **"Imprimir só este grupo"** (o menu também traz Início aqui / Fim aqui / Lote todo). Também dá para marcar **"Fim aqui"** (imprimir só um trecho) e/ou preencher **"Máx. etiquetas"** (imprimir só as próximas N, quando você sabe quanto ainda cabe na bobina). As linhas fora da faixa ficam **cinza apagado** no preview e o botão mostra o que vai sair ("Imprimir Faixa (320)"); **"Lote todo"** limpa a faixa. Nada é reordenado — a faixa só recorta a fila, e o grupo recortado continua recebendo sua separadora. A escala do texto continua calibrada pelo **lote inteiro**, então a parte retomada sai idêntica à que já foi impressa. No modelo **fiel (pass-through)** a faixa remonta apenas os blocos `^XA..^XZ` do recorte; como uma folha 10x15 em GRF carrega vários stickers e é indivisível, o log avisa quantas etiquetas de carona saem junto.
 - Preview por SKU ou individual, com **imagem real da etiqueta**, e quantidade por SKU (SKU lido do **QR code** de cada sticker via pyzbar no fluxo TXT). As separadoras aparecem como linhas próprias na lista e podem ser conferidas no painel de imagem.
 - **Interpretação local de ZPL (substituto do Labelary)**: botão "Interpretar ZPL" renderiza o ZPL em imagem — texto, fontes, barcodes, QR, etc. — usando `zpl-renderer-js` (WASM) via Node, **sem Labelary online nem limite de caracteres**.
 - **Seller SKU via catálogo manual**: duplo-clique numa linha cadastra o mapeamento SKU Shopee → Seller SKU (persistido em `data/sku_catalog.json`).
@@ -47,13 +48,13 @@ fullprint/
 │   ├── config/{settings.py, config.yaml}
 │   ├── core/{parser.py, pdf_reader.py, agrupador.py, grf_decoder.py,
 │   │         sku_catalog.py, ocr_seller.py, label_models.py,
-│   │         label_renderer.py, zpl_renderer.py}
+│   │         label_renderer.py, zpl_renderer.py, faixa_impressao.py}
 │   ├── services/{printer.py, spooler_worker.py, updater.py}
 │   ├── database/     # Fase 2
 │   ├── ui/{app.py, views/{main_view.py, label_config.py, ocr_batch_dialog.py}}
 │   └── utils/{logger.py, zpl_utils.py, runtime.py}
 ├── renderer/{package.json, render.mjs}   # motor Node (zpl-renderer-js) p/ interpretar ZPL
-├── tests/{test_parser.py, smoke_pdf.py, smoke_pdf_render.py,
+├── tests/{test_parser.py, test_faixa.py, smoke_pdf.py, smoke_pdf_render.py,
 │          smoke_pdf_pipeline.py, smoke_pipeline.py, smoke_grf.py, render_grf.py}
 ├── logs/  data/
 ├── requirements.txt
